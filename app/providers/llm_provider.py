@@ -3,6 +3,7 @@
 import json
 import logging
 import random
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.core.models import QuizQuestion
 from app.quiz.history_store import QuizHistoryStore
+from app.utils.ops_log import log_operation
 from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,7 @@ class LLMQuestionProvider:
         stage: str = 'core',
         category_bias: dict[str, float] | None = None,
     ) -> QuizQuestion:
+        started = time.perf_counter()
         category = self._choose_category(chat_id, preferred_category, category_bias or {})
         round_type = self._choose_round_type(chat_id, category, stage, allow_image_rounds, allow_music_rounds)
 
@@ -140,6 +143,14 @@ class LLMQuestionProvider:
                 )
                 self._apply_stage_profile(question, stage)
                 self._remember_question(chat_id, question)
+                log_operation(
+                    logger,
+                    operation='question_generate',
+                    chat_id=chat_id,
+                    result='ok',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                )
                 return question
 
         if round_type == 'image':
@@ -152,12 +163,28 @@ class LLMQuestionProvider:
                 )
                 self._apply_stage_profile(question, stage)
                 self._remember_question(chat_id, question)
+                log_operation(
+                    logger,
+                    operation='question_generate',
+                    chat_id=chat_id,
+                    result='ok',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                )
                 return question
 
         try:
             question = await self._generate_text_question(chat_id, recent_keys, category, stage)
             self._apply_stage_profile(question, stage)
             self._remember_question(chat_id, question)
+            log_operation(
+                logger,
+                operation='question_generate',
+                chat_id=chat_id,
+                result='ok',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+            )
             return question
         except Exception as exc:
             logger.exception('LLM question generation failed: %s', exc)
@@ -166,6 +193,16 @@ class LLMQuestionProvider:
             question = QuizQuestion(**fallback, source='fallback')
             self._apply_stage_profile(question, stage)
             self._remember_question(chat_id, question)
+            log_operation(
+                logger,
+                operation='question_generate',
+                chat_id=chat_id,
+                result='fallback',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_type=type(exc).__name__,
+                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                level=logging.WARNING,
+            )
             return question
 
     def _apply_stage_profile(self, question: QuizQuestion, stage: str) -> None:

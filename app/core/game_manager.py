@@ -18,6 +18,7 @@ from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
+from app.utils.ops_log import log_operation
 from app.utils.text import answer_match_details
 
 logger = logging.getLogger(__name__)
@@ -123,10 +124,18 @@ class GameManager:
         question_limit: int,
         quiz_mode: str = 'classic',
     ) -> str:
+        started = time.perf_counter()
         lock = self._get_start_lock(chat_id)
 
         async with lock:
             if chat_id in self.games and self.games[chat_id].is_active:
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='already_active',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
                 return 'Игра уже идет в этом чате. Сначала закончи текущую — этот квиз не любит бигамию 😏'
 
             self._clear_pending_invite(chat_id)
@@ -164,6 +173,14 @@ class GameManager:
             )
 
         await self._ask_next_question(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_start',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'question_limit': question_limit, 'quiz_mode': quiz_mode},
+        )
         return 'OK'
 
     def _mode_label(self, quiz_mode: str) -> str:
@@ -183,8 +200,16 @@ class GameManager:
         return timeout
 
     async def stop_game(self, bot: Bot, chat_id: int, reason: str = 'Игра остановлена.') -> str:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state or not state.is_active:
+            log_operation(
+                logger,
+                operation='game_stop',
+                chat_id=chat_id,
+                result='no_active_game',
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
             return 'В этом чате нет активной игры.'
 
         state.is_active = False
@@ -192,6 +217,13 @@ class GameManager:
 
         await bot.send_message(chat_id, f'⛔ {reason}')
         await self._finalize_game(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_stop',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
         return 'OK'
 
     async def handle_answer(self, bot: Bot, chat_id: int, user_id: int, username: str, text: str) -> bool:
@@ -598,6 +630,7 @@ class GameManager:
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state:
             return
@@ -640,6 +673,14 @@ class GameManager:
             logger.exception('Failed to save game result: %s', exc)
 
         self.games.pop(chat_id, None)
+        log_operation(
+            logger,
+            operation='game_finalize',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'players': len(ranking), 'asked_count': state.asked_count},
+        )
 
     def _cancel_question_task(self, chat_id: int) -> None:
         task = self.question_tasks.pop(chat_id, None)

@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -10,6 +11,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.utils.ops_log import log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -99,20 +101,51 @@ class WebSearchProvider:
         if not query:
             return '🌐 Дай сам запрос. Например: /web кто такой Чингисхан'
 
+        started = time.perf_counter()
         try:
             answer, sources = await self._run_search(query)
         except Exception as exc:
             logger.exception('Web search failed: %s', exc)
+            log_operation(
+                logger,
+                operation='web_search',
+                result='error',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_type=type(exc).__name__,
+                extra={'query_len': len(query)},
+                level=logging.WARNING,
+            )
             return '🌐 С поиском сейчас вышел неловкий технический номер. Попробуй ещё раз через минуту.'
 
         if not answer:
+            log_operation(
+                logger,
+                operation='web_search',
+                result='empty',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                extra={'query_len': len(query)},
+            )
             return '🌐 Я сходил в сеть, но внятной сводки не собрал. Запрос слишком мутный или выдача пустая.'
 
         styled = await self._polish_answer(chat_title=chat_title, username=username, query=query, search_answer=answer)
         source_block = self._format_sources(sources)
 
         if source_block:
+            log_operation(
+                logger,
+                operation='web_search',
+                result='ok',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                extra={'query_len': len(query), 'sources': len(sources)},
+            )
             return f'🌐 По сети по запросу: {query}\n\n{styled}\n\nИсточники:\n{source_block}'
+        log_operation(
+            logger,
+            operation='web_search',
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'query_len': len(query), 'sources': len(sources)},
+        )
         return f'🌐 По сети по запросу: {query}\n\n{styled}'
 
     async def _run_search(self, query: str) -> tuple[str, list[SearchSource]]:

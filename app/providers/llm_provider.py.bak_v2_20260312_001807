@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import json
+import logging
+import random
+from typing import Any, Iterable
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+
+from app.config import settings
+from app.core.models import QuizQuestion
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """
+Ты — генератор вопросов для Telegram-квиз бота.
+Твоя задача: вернуть РОВНО один JSON-объект без markdown, без пояснений и без лишнего текста.
+
+Правила:
+- Вопрос должен быть однозначным.
+- Должен быть один основной правильный ответ.
+- Ответ должен быть коротким.
+- Не задавай спорные или субъективные вопросы.
+- Пиши по-русски.
+- Избегай повторов и слишком редких фактов.
+- Сложность: easy, medium или hard.
+- Категория — короткая строка.
+- Подсказка должна помогать, но не выдавать ответ напрямую.
+- Explanation — 1 короткое предложение.
+
+Формат JSON:
+{
+  "category": "...",
+  "difficulty": "easy|medium|hard",
+  "question": "...",
+  "answer": "...",
+  "aliases": ["..."],
+  "hint": "...",
+  "explanation": "..."
+}
+""".strip()
+
+
+class QuestionPayload(BaseModel):
+    category: str = Field(min_length=2, max_length=50)
+    difficulty: str = Field(pattern='^(easy|medium|hard)$')
+    question: str = Field(min_length=10, max_length=300)
+    answer: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+    hint: str = Field(min_length=5, max_length=200)
+    explanation: str = Field(min_length=5, max_length=250)
+
+
+FALLBACK_QUESTIONS = [
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Столица Франции?',
+        'answer': 'Париж',
+        'aliases': [],
+        'hint': 'Город Эйфелевой башни.',
+        'explanation': 'Париж — столица Франции.',
+    },
+    {
+        'category': 'Наука',
+        'difficulty': 'easy',
+        'question': 'Какая планета Солнечной системы самая большая?',
+        'answer': 'Юпитер',
+        'aliases': [],
+        'hint': 'Это газовый гигант.',
+        'explanation': 'Юпитер — крупнейшая планета Солнечной системы.',
+    },
+    {
+        'category': 'Литература',
+        'difficulty': 'easy',
+        'question': 'Кто написал роман «Война и мир»?',
+        'answer': 'Лев Толстой',
+        'aliases': ['Толстой'],
+        'hint': 'Русский писатель XIX века.',
+        'explanation': 'Автор романа — Лев Николаевич Толстой.',
+    },
+    {
+        'category': 'Музыка',
+        'difficulty': 'medium',
+        'question': 'Какая группа исполнила песню «Bohemian Rhapsody»?',
+        'answer': 'Queen',
+        'aliases': ['Квин'],
+        'hint': 'Британская рок-группа с Фредди Меркьюри.',
+        'explanation': 'Песня «Bohemian Rhapsody» принадлежит группе Queen.',
+    },
+    {
+        'category': 'Кино',
+        'difficulty': 'easy',
+        'question': 'Как зовут мальчика-волшебника со шрамом на лбу?',
+        'answer': 'Гарри Поттер',
+        'aliases': ['Поттер', 'Harry Potter'],
+        'hint': 'Учился в Хогвартсе.',
+        'explanation': 'Главный герой серии книг — Гарри Поттер.',
+    },
+    {
+        'category': 'История',
+        'difficulty': 'medium',
+        'question': 'В каком городе находятся пирамиды Гизы?',
+        'answer': 'Гиза',
+        'aliases': ['Эль Гиза', 'Эль-Гиза'],
+        'hint': 'Город рядом с Каиром.',
+        'explanation': 'Пирамиды расположены на плато Гиза.',
+    },
+    {
+        'category': 'Спорт',
+        'difficulty': 'easy',
+        'question': 'Сколько игроков одной команды находится на поле в футболе во время игры?',
+        'answer': '11',
+        'aliases': ['одиннадцать'],
+        'hint': 'Больше десяти, но меньше двенадцати.',
+        'explanation': 'На поле играют 11 футболистов от каждой команды.',
+    },
+    {
+        'category': 'Технологии',
+        'difficulty': 'medium',
+        'question': 'Как называется компания, создавшая Telegram?',
+        'answer': 'Telegram',
+        'aliases': [],
+        'hint': 'Название совпадает с названием мессенджера.',
+        'explanation': 'Мессенджер развивается одноимённой компанией Telegram.',
+    },
+]
+
+
+class LLMQuestionProvider:
+    def __init__(self) -> None:
+        self.client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        self.model = settings.openai_model
+
+    async def generate_question(self, used_questions: set[str]) -> QuizQuestion:
+        try:
+            payload = await self._generate_via_llm(used_questions)
+            return QuizQuestion(**payload.model_dump(), source='llm')
+        except Exception as exc:
+            logger.exception('LLM question generation failed: %s', exc)
+            fallback = self._pick_fallback_question(used_questions)
+            return QuizQuestion(**fallback, source='fallback')
+
+    async def _generate_via_llm(self, used_questions: set[str]) -> QuestionPayload:
+        used_block = '\n'.join(f'- {item}' for item in list(used_questions)[-12:]) or '- повторов пока нет'
+
+        user_prompt = f"""
+Сгенерируй один вопрос для группового чата Telegram.
+
+Ограничения:
+- не повторять эти вопросы или их смысл:
+{used_block}
+- желательно массово понятная тема
+- уровень сложности: medium
+- формат ответа — только JSON
+""".strip()
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.8,
+            messages=[
+                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'user', 'content': user_prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content or ''
+        return self._parse_payload(content)
+
+    def _parse_payload(self, content: str) -> QuestionPayload:
+        raw = content.strip()
+
+        if raw.startswith('```'):
+            raw = raw.strip('`')
+            raw = raw.replace('json', '', 1).strip()
+
+        data: Any = json.loads(raw)
+        return QuestionPayload.model_validate(data)
+
+    def _pick_fallback_question(self, used_questions: Iterable[str]) -> dict[str, Any]:
+        used_set = set(used_questions)
+        candidates = [item for item in FALLBACK_QUESTIONS if item['question'] not in used_set]
+        if not candidates:
+            candidates = FALLBACK_QUESTIONS[:]
+        return random.choice(candidates)

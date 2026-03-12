@@ -1,0 +1,26 @@
+﻿[
+  {
+    "category": "Музыка",
+    "difficulty": "medium",
+    "question": "Угадай исполнителя по фрагменту.",
+    "answer": "Nirvana",
+    "aliases": [],
+    "hint": "Группа Курта Кобейна.",
+    "explanation": "Это Nirvana.",
+    "audio_path": "data/music/nirvana_clip.mp3",
+    "audio_title": "Фрагмент 1",
+    "audio_performer": "Quiz Round"
+  },
+  {
+    "category": "Музыка",
+    "difficulty": "medium",
+    "question": "Угадай песню по фрагменту.",
+    "answer": "Believer",
+    "aliases": ["Imagine Dragons - Believer", "Imagine Dragons"],
+    "hint": "Очень известный трек Imagine Dragons.",
+    "explanation": "Это Believer.",
+    "audio_path": "data/music/believer_clip.mp3",
+    "audio_title": "Фрагмент 2",
+    "audio_performer": "Quiz Round"
+  }
+]

@@ -1,0 +1,149 @@
+﻿from __future__ import annotations
+
+import json
+import re
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+
+class MemoryStore:
+    def __init__(self, path: str = 'data/agent_memory.json') -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.data = self._load()
+
+    def _load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {'chats': {}}
+        try:
+            return json.loads(self.path.read_text(encoding='utf-8'))
+        except Exception:
+            return {'chats': {}}
+
+    def _save(self) -> None:
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    def _ensure_chat(self, chat_id: int) -> dict[str, Any]:
+        chats = self.data.setdefault('chats', {})
+        chat = chats.setdefault(str(chat_id), {
+            'message_count': 0,
+            'topic_scores': {},
+            'users': {},
+            'updated_at': '',
+        })
+        return chat
+
+    def _ensure_user(self, chat: dict[str, Any], user_id: int, username: str) -> dict[str, Any]:
+        users = chat.setdefault('users', {})
+        user = users.setdefault(str(user_id), {
+            'username': username,
+            'message_count': 0,
+            'likes_quiz_score': 0,
+            'roast_opt_in': False,
+            'topic_scores': {},
+            'summary': '',
+            'first_seen_at': self._now(),
+            'last_seen_at': self._now(),
+        })
+        user['username'] = username
+        return user
+
+    def _now(self) -> str:
+        return datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+
+    def note_message(self, chat_id: int, user_id: int, username: str, text: str) -> None:
+        text = (text or '').strip()
+        if not text:
+            return
+
+        chat = self._ensure_chat(chat_id)
+        user = self._ensure_user(chat, user_id, username)
+
+        chat['message_count'] = int(chat.get('message_count', 0)) + 1
+        chat['updated_at'] = self._now()
+
+        user['message_count'] = int(user.get('message_count', 0)) + 1
+        user['last_seen_at'] = self._now()
+
+        topics = self._extract_topics(text)
+        self._bump_scores(chat.setdefault('topic_scores', {}), topics, 1)
+        self._bump_scores(user.setdefault('topic_scores', {}), topics, 2)
+
+        lowered = text.lower()
+        if any(token in lowered for token in ['квиз', 'викторин', 'вопрос']):
+            user['likes_quiz_score'] = int(user.get('likes_quiz_score', 0)) + 1
+
+        if any(token in lowered for token in ['роаст', 'прожарь', 'обосри', 'поругай меня', 'разнеси меня']):
+            user['roast_opt_in'] = True
+
+        user['summary'] = self._build_user_summary(user)
+        self._save()
+
+    def note_quiz_event(self, chat_id: int, user_id: int, username: str, correct: bool = False, won: bool = False) -> None:
+        chat = self._ensure_chat(chat_id)
+        user = self._ensure_user(chat, user_id, username)
+        if correct:
+            user['likes_quiz_score'] = int(user.get('likes_quiz_score', 0)) + 2
+        if won:
+            user['likes_quiz_score'] = int(user.get('likes_quiz_score', 0)) + 3
+        user['summary'] = self._build_user_summary(user)
+        self._save()
+
+    def get_user_summary(self, chat_id: int, user_id: int, username: str) -> str:
+        chat = self._ensure_chat(chat_id)
+        user = self._ensure_user(chat, user_id, username)
+        summary = str(user.get('summary') or '').strip()
+        if summary:
+            return summary
+        return 'Пока почти ничего не известно. Новый или молчаливый участник.'
+
+    def get_chat_summary(self, chat_id: int) -> str:
+        chat = self._ensure_chat(chat_id)
+        topic_scores = chat.get('topic_scores', {}) or {}
+        top_topics = [name for name, _ in sorted(topic_scores.items(), key=lambda x: (-x[1], x[0]))[:5]]
+        message_count = int(chat.get('message_count', 0))
+        parts: list[str] = []
+        if message_count >= 100:
+            parts.append('чат уже довольно разговорчивый')
+        elif message_count >= 20:
+            parts.append('чат умеренно активный')
+        else:
+            parts.append('чат пока не очень разговорчивый')
+
+        if top_topics:
+            parts.append('частые темы: ' + ', '.join(top_topics))
+        return '; '.join(parts)
+
+    def _extract_topics(self, text: str) -> list[str]:
+        stopwords = {
+            'бот', 'бота', 'боту', 'сегодня', 'сейчас', 'просто', 'вообще', 'короче', 'типа',
+            'очень', 'можно', 'нужно', 'давай', 'почему', 'когда', 'какой', 'какая', 'какие',
+            'это', 'этот', 'того', 'тебе', 'меня', 'мне', 'него', 'нее', 'него', 'них',
+            'есть', 'как', 'что', 'кто', 'где', 'или', 'для', 'надо', 'если', 'еще', 'ещё',
+            'привет', 'ладно', 'хочу', 'будет', 'сети', 'интернете'
+        }
+        words = re.findall(r'[A-Za-zА-Яа-яЁё0-9]{4,}', text.lower())
+        filtered = [w for w in words if w not in stopwords]
+        counts = Counter(filtered)
+        return [word for word, _ in counts.most_common(5)]
+
+    def _bump_scores(self, target: dict[str, Any], topics: list[str], weight: int) -> None:
+        for topic in topics:
+            target[topic] = int(target.get(topic, 0)) + weight
+
+    def _build_user_summary(self, user: dict[str, Any]) -> str:
+        topic_scores = user.get('topic_scores', {}) or {}
+        top_topics = [name for name, _ in sorted(topic_scores.items(), key=lambda x: (-x[1], x[0]))[:4]]
+
+        parts: list[str] = []
+        if int(user.get('likes_quiz_score', 0)) >= 4:
+            parts.append('любит квизы или активно в них участвует')
+        if bool(user.get('roast_opt_in')):
+            parts.append('нормально относится к дружескому roast')
+        if top_topics:
+            parts.append('частые темы: ' + ', '.join(top_topics))
+        if int(user.get('message_count', 0)) >= 20:
+            parts.append('довольно активный участник')
+        return '; '.join(parts) if parts else 'пока почти ничего не известно'

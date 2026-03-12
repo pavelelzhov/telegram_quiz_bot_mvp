@@ -1,0 +1,47 @@
+import re
+import unicodedata
+from typing import Iterable, Optional
+
+
+def normalize_text(value: str) -> str:
+    value = value.strip().lower()
+    value = value.replace('ё', 'е')
+    value = unicodedata.normalize('NFKD', value)
+    value = ''.join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r'[^\w\s]', ' ', value, flags=re.UNICODE)
+    value = re.sub(r'[_]+', ' ', value)
+    value = re.sub(r'\s+', ' ', value).strip()
+    return value
+
+
+def build_answer_variants(correct_answer: str, aliases: Optional[Iterable[str]] = None) -> list[str]:
+    variants = [correct_answer]
+    if aliases:
+        variants.extend(list(aliases))
+
+    normalized = []
+    for item in variants:
+        if not item or not item.strip():
+            continue
+        norm = normalize_text(item)
+        if norm and norm not in normalized:
+            normalized.append(norm)
+    return normalized
+
+
+def is_correct_answer(user_text: str, correct_answer: str, aliases: Optional[list[str]] = None) -> bool:
+    user_norm = normalize_text(user_text)
+    if not user_norm:
+        return False
+
+    valid = build_answer_variants(correct_answer, aliases)
+    if user_norm in valid:
+        return True
+
+    for item in valid:
+        if len(item) >= 5 and item in user_norm:
+            return True
+        if len(user_norm) >= 5 and user_norm in item:
+            return True
+
+    return False

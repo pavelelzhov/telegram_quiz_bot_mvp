@@ -1,0 +1,46 @@
+﻿from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+
+BUTTON_TO_CATEGORY = {
+    '🎲 Случайно': 'Случайно',
+    '🌍 География': 'География',
+    '🎬 Кино': 'Кино',
+    '🎵 Музыка': 'Музыка',
+    '📚 История': 'История',
+    '🤖 Технологии': 'Технологии',
+}
+
+BUTTON_TEXTS = set(BUTTON_TO_CATEGORY.keys()) | {
+    '🎮 Квиз 5',
+    '🎮 Квиз 10',
+    '🎮 Квиз 15',
+    '💡 Подсказка',
+    '⏭ Пропустить',
+    '🏆 Очки',
+    '📊 Статус',
+    '👥 Топ',
+    '⛔ Стоп',
+    '⚙️ Настройки',
+    '⏱ Таймер',
+    '🖼 Картинки',
+    '🎧 Музыка-раунды',
+    '👮 Админ-режим',
+    '🤖 Host-режим',
+}
+
+
+def main_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text='🎮 Квиз 5'), KeyboardButton(text='🎮 Квиз 10'), KeyboardButton(text='🎮 Квиз 15')],
+            [KeyboardButton(text='🎲 Случайно'), KeyboardButton(text='🌍 География'), KeyboardButton(text='🎬 Кино')],
+            [KeyboardButton(text='🎵 Музыка'), KeyboardButton(text='📚 История'), KeyboardButton(text='🤖 Технологии')],
+            [KeyboardButton(text='⚙️ Настройки'), KeyboardButton(text='⏱ Таймер')],
+            [KeyboardButton(text='🖼 Картинки'), KeyboardButton(text='🎧 Музыка-раунды')],
+            [KeyboardButton(text='👮 Админ-режим'), KeyboardButton(text='🤖 Host-режим')],
+            [KeyboardButton(text='💡 Подсказка'), KeyboardButton(text='⏭ Пропустить')],
+            [KeyboardButton(text='🏆 Очки'), KeyboardButton(text='📊 Статус')],
+            [KeyboardButton(text='👥 Топ'), KeyboardButton(text='⛔ Стоп')],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder='Выбери действие…',
+    )

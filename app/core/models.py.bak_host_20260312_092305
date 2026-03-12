@@ -1,0 +1,55 @@
+﻿from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
+
+
+@dataclass(slots=True)
+class QuizQuestion:
+    category: str
+    difficulty: str
+    question: str
+    answer: str
+    aliases: List[str]
+    hint: str
+    explanation: str
+    key: str = ''
+    source: str = 'llm'
+    question_type: str = 'text'
+    photo_url: Optional[str] = None
+    audio_path: Optional[str] = None
+    audio_title: Optional[str] = None
+    audio_performer: Optional[str] = None
+
+
+@dataclass(slots=True)
+class PlayerScore:
+    user_id: int
+    username: str
+    points: int = 0
+
+
+@dataclass(slots=True)
+class ChatSettings:
+    question_timeout_sec: int = 30
+    image_rounds_enabled: bool = True
+    music_rounds_enabled: bool = True
+    admin_only_control: bool = False
+    chat_mode_enabled: bool = True
+
+
+@dataclass(slots=True)
+class GameState:
+    chat_id: int
+    started_by_user_id: int
+    question_limit: int
+    preferred_category: str = 'Случайно'
+    asked_count: int = 0
+    current_question: Optional[QuizQuestion] = None
+    current_question_answered: bool = False
+    scores: Dict[int, PlayerScore] = field(default_factory=dict)
+    used_question_keys: Set[str] = field(default_factory=set)
+    hints_used_for_current_question: int = 0
+    near_miss_user_ids: Set[int] = field(default_factory=set)
+    wrong_reply_user_ids: Set[int] = field(default_factory=set)
+    is_active: bool = True

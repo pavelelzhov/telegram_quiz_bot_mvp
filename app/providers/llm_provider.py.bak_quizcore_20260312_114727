@@ -1,0 +1,512 @@
+﻿from __future__ import annotations
+
+import json
+import logging
+import random
+from pathlib import Path
+from typing import Any, Iterable
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+
+from app.config import settings
+from app.core.models import QuizQuestion
+from app.utils.text import normalize_text
+
+logger = logging.getLogger(__name__)
+
+CATEGORY_RANDOM = 'Случайно'
+SUPPORTED_CATEGORIES = ['География', 'Кино', 'Музыка', 'История', 'Технологии', 'Общие знания']
+
+QUESTION_SYSTEM_PROMPT = """
+Ты — генератор вопросов для Telegram-квиз бота.
+Верни РОВНО один JSON-объект без markdown, без пояснений и без лишнего текста.
+
+Жесткие правила:
+- вопрос должен быть однозначным
+- должен быть один основной правильный ответ
+- ответ должен быть коротким
+- не задавай спорные или субъективные вопросы
+- не используй слишком редкие факты
+- пиши по-русски
+- difficulty: easy, medium или hard
+- category: короткая строка
+- aliases: массив коротких альтернативных ответов
+- hint: полезная подсказка, но не прямой ответ
+- explanation: одно короткое предложение
+
+Формат:
+{
+  "category": "География",
+  "difficulty": "easy",
+  "question": "Столица Франции?",
+  "answer": "Париж",
+  "aliases": ["paris"],
+  "hint": "Город Эйфелевой башни.",
+  "explanation": "Париж — столица Франции."
+}
+""".strip()
+
+CHAT_SYSTEM_PROMPT = """
+Ты — живой участник Telegram-чата и одновременно ведущий квиз-бот.
+Задача: отвечать естественно, коротко, по-человечески и с лёгким юмором.
+
+Правила:
+- отвечай по-русски
+- 1-3 коротких абзаца или 1-4 коротких предложения
+- не пиши сухо и канцелярски
+- не пиши, что ты ИИ, модель, ассистент или бот-помощник
+- не спамь и не расписывай простыни
+- если идёт квиз, не раскрывай правильный ответ напрямую
+- если вопрос из квиза ещё активен, можно поддразнить, намекнуть, пошутить, но без спойлера
+- если пользователь явно обращается к тебе, отвечай адресно
+- если общение обычное, веди себя как нормальный остроумный участник чата
+- не используй markdown
+- не повторяй одни и те же фразы
+""".strip()
+
+
+class QuestionPayload(BaseModel):
+    category: str = Field(min_length=2, max_length=50)
+    difficulty: str = Field(pattern='^(easy|medium|hard)$')
+    question: str = Field(min_length=8, max_length=300)
+    answer: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list)
+    hint: str = Field(min_length=3, max_length=200)
+    explanation: str = Field(min_length=3, max_length=250)
+
+
+TEXT_FALLBACK_QUESTIONS = [
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Столица Франции?',
+        'answer': 'Париж',
+        'aliases': ['paris'],
+        'hint': 'Город Эйфелевой башни.',
+        'explanation': 'Париж — столица Франции.',
+    },
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Какая река протекает через Каир?',
+        'answer': 'Нил',
+        'aliases': [],
+        'hint': 'Одна из самых длинных рек мира.',
+        'explanation': 'Через Каир протекает Нил.',
+    },
+    {
+        'category': 'Кино',
+        'difficulty': 'easy',
+        'question': 'Как зовут мальчика-волшебника со шрамом на лбу?',
+        'answer': 'Гарри Поттер',
+        'aliases': ['Поттер', 'Harry Potter'],
+        'hint': 'Учился в Хогвартсе.',
+        'explanation': 'Главный герой серии книг и фильмов — Гарри Поттер.',
+    },
+    {
+        'category': 'Музыка',
+        'difficulty': 'medium',
+        'question': 'Какая группа исполнила песню «Bohemian Rhapsody»?',
+        'answer': 'Queen',
+        'aliases': ['Квин'],
+        'hint': 'Британская рок-группа с Фредди Меркьюри.',
+        'explanation': 'Песня «Bohemian Rhapsody» принадлежит группе Queen.',
+    },
+    {
+        'category': 'История',
+        'difficulty': 'easy',
+        'question': 'Кто был первым человеком, полетевшим в космос?',
+        'answer': 'Юрий Гагарин',
+        'aliases': ['Гагарин'],
+        'hint': 'Советский космонавт, полет состоялся в 1961 году.',
+        'explanation': 'Первым человеком в космосе стал Юрий Гагарин.',
+    },
+    {
+        'category': 'Технологии',
+        'difficulty': 'medium',
+        'question': 'Какой язык разметки используется для структуры веб-страниц?',
+        'answer': 'HTML',
+        'aliases': [],
+        'hint': 'Не язык программирования, а язык разметки.',
+        'explanation': 'Для структуры веб-страниц используется HTML.',
+    },
+    {
+        'category': 'Общие знания',
+        'difficulty': 'easy',
+        'question': 'Какая планета Солнечной системы самая большая?',
+        'answer': 'Юпитер',
+        'aliases': [],
+        'hint': 'Это газовый гигант.',
+        'explanation': 'Юпитер — крупнейшая планета Солнечной системы.',
+    },
+]
+
+IMAGE_FALLBACK_QUESTIONS = [
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Что это за страна по флагу?',
+        'answer': 'Франция',
+        'aliases': ['France'],
+        'hint': 'Столица — Париж.',
+        'explanation': 'Это флаг Франции.',
+        'question_type': 'image',
+        'photo_url': 'https://flagcdn.com/w1280/fr.png',
+    },
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Что это за страна по флагу?',
+        'answer': 'Япония',
+        'aliases': ['Japan'],
+        'hint': 'Страна восходящего солнца.',
+        'explanation': 'Это флаг Японии.',
+        'question_type': 'image',
+        'photo_url': 'https://flagcdn.com/w1280/jp.png',
+    },
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Что это за страна по флагу?',
+        'answer': 'Германия',
+        'aliases': ['Germany'],
+        'hint': 'Столица — Берлин.',
+        'explanation': 'Это флаг Германии.',
+        'question_type': 'image',
+        'photo_url': 'https://flagcdn.com/w1280/de.png',
+    },
+]
+
+
+class LLMQuestionProvider:
+    def __init__(self) -> None:
+        self.client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        self.model = settings.openai_model
+        self.music_rounds = self._load_music_rounds()
+
+    async def generate_question(
+        self,
+        used_keys: set[str],
+        preferred_category: str = CATEGORY_RANDOM,
+        allow_image_rounds: bool = True,
+        allow_music_rounds: bool = True,
+    ) -> QuizQuestion:
+        if allow_music_rounds and self.music_rounds and self._should_use_music_round(preferred_category):
+            music_item = self._pick_music_round(used_keys=used_keys, preferred_category=preferred_category)
+            if music_item:
+                key = self._question_key(music_item['question'], music_item['answer'], music_item.get('audio_path'))
+                return QuizQuestion(**music_item, key=key, source='music_pool')
+
+        if allow_image_rounds and self._should_use_image_round(preferred_category):
+            image_item = self._pick_image_question(used_keys=used_keys, preferred_category=preferred_category)
+            if image_item:
+                key = self._question_key(image_item['question'], image_item['answer'], image_item.get('photo_url'))
+                return QuizQuestion(**image_item, key=key, source='image_pool')
+
+        try:
+            payload = await self._generate_via_llm(used_keys=used_keys, preferred_category=preferred_category)
+            key = self._question_key(payload.question, payload.answer)
+            return QuizQuestion(**payload.model_dump(), key=key, source='llm')
+        except Exception as exc:
+            logger.exception('LLM question generation failed: %s', exc)
+            fallback = self._pick_text_fallback_question(used_keys=used_keys, preferred_category=preferred_category)
+            fallback['key'] = self._question_key(fallback['question'], fallback['answer'])
+            return QuizQuestion(**fallback, source='fallback')
+
+    async def generate_chat_reply(
+        self,
+        chat_title: str,
+        username: str,
+        user_text: str,
+        history: list[dict[str, str]],
+        quiz_active: bool,
+        current_question_text: str | None = None,
+        addressed: bool = False,
+    ) -> str:
+        history_text_lines: list[str] = []
+        for item in history[-12:]:
+            role = item.get('role', 'user')
+            speaker = item.get('speaker', 'someone')
+            text = item.get('text', '')
+            history_text_lines.append(f'{role}:{speaker}: {text}')
+
+        history_text = '\n'.join(history_text_lines) if history_text_lines else 'контекст пуст'
+        quiz_block = 'Квиз сейчас не активен.'
+        if quiz_active:
+            quiz_block = f'Квиз активен. Текущий вопрос: {current_question_text or "вопрос скрыт"}'
+
+        addressing = 'Пользователь обращается прямо к тебе.' if addressed else 'Это обычное сообщение в чате.'
+
+        user_prompt = f"""
+Чат: {chat_title}
+{addressing}
+{quiz_block}
+
+Недавний контекст:
+{history_text}
+
+Последнее сообщение пользователя @{username}:
+{user_text}
+
+Ответь как живой участник чата. Коротко, уместно, с характером.
+""".strip()
+
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.8,
+                messages=[
+                    {'role': 'system', 'content': CHAT_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+            )
+            content = (response.choices[0].message.content or '').strip()
+            return self._cleanup_chat_reply(content)
+        except Exception as exc:
+            logger.exception('LLM chat reply failed: %s', exc)
+            return ''
+
+    async def _generate_via_llm(self, used_keys: set[str], preferred_category: str) -> QuestionPayload:
+        used_block = '\n'.join(f'- {item}' for item in list(used_keys)[-20:]) or '- повторов пока нет'
+
+        if preferred_category == CATEGORY_RANDOM:
+            category_instruction = (
+                'Выбери одну массово понятную категорию из списка: '
+                + ', '.join(SUPPORTED_CATEGORIES)
+                + '.'
+            )
+        else:
+            category_instruction = f'Категория должна быть строго: {preferred_category}.'
+
+        user_prompt = f"""
+Сгенерируй один вопрос для группового чата Telegram.
+
+Условия:
+- не повторять эти вопросы или их смысл:
+{used_block}
+- {category_instruction}
+- вопрос должен быть понятным большинству людей
+- уровень сложности: medium
+- верни только JSON
+""".strip()
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.6,
+            messages=[
+                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                {'role': 'user', 'content': user_prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content or ''
+
+        try:
+            payload = self._parse_payload(content)
+        except Exception:
+            payload = await self._repair_payload(content)
+
+        if preferred_category != CATEGORY_RANDOM:
+            payload.category = preferred_category
+        else:
+            payload.category = self._normalize_category(payload.category)
+
+        return payload
+
+    async def _repair_payload(self, broken_content: str) -> QuestionPayload:
+        repair_prompt = f"""
+Ниже ответ модели, который должен был быть валидным JSON, но сломан.
+Исправь его и верни только один валидный JSON-объект без markdown и без пояснений.
+
+Сломанный ответ:
+{broken_content}
+""".strip()
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.1,
+            messages=[
+                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                {'role': 'user', 'content': repair_prompt},
+            ],
+        )
+
+        repaired = response.choices[0].message.content or ''
+        return self._parse_payload(repaired)
+
+    def _parse_payload(self, content: str) -> QuestionPayload:
+        raw = self._extract_json_object(content)
+        data: Any = json.loads(raw)
+
+        aliases = data.get('aliases', [])
+        if not isinstance(aliases, list):
+            aliases = [str(aliases)]
+
+        normalized = {
+            'category': str(data.get('category', 'Общие знания')).strip() or 'Общие знания',
+            'difficulty': str(data.get('difficulty', 'medium')).strip().lower() or 'medium',
+            'question': str(data.get('question', '')).strip(),
+            'answer': str(data.get('answer', '')).strip(),
+            'aliases': [str(item).strip() for item in aliases if str(item).strip()],
+            'hint': str(data.get('hint', '')).strip(),
+            'explanation': str(data.get('explanation', '')).strip(),
+        }
+        return QuestionPayload.model_validate(normalized)
+
+    def _extract_json_object(self, content: str) -> str:
+        raw = content.strip()
+
+        if raw.startswith('```'):
+            raw = raw.strip('`').strip()
+            if raw.lower().startswith('json'):
+                raw = raw[4:].strip()
+
+        first = raw.find('{')
+        last = raw.rfind('}')
+        if first == -1 or last == -1 or last <= first:
+            logger.warning('LLM raw response without JSON: %s', content[:1000])
+            raise ValueError('LLM did not return a JSON object.')
+
+        return raw[first:last + 1]
+
+    def _cleanup_chat_reply(self, text: str) -> str:
+        value = text.strip()
+        if value.startswith('```'):
+            value = value.strip('`').strip()
+        if len(value) > 700:
+            value = value[:700].rstrip() + '...'
+        return value
+
+    def _normalize_category(self, category: str) -> str:
+        category_norm = normalize_text(category)
+        for item in SUPPORTED_CATEGORIES:
+            if normalize_text(item) == category_norm:
+                return item
+        return 'Общие знания'
+
+    def _question_key(self, question: str, answer: str, extra: str | None = None) -> str:
+        base = f'{normalize_text(question)}|{normalize_text(answer)}'
+        if extra:
+            base += f'|{normalize_text(extra)}'
+        return base
+
+    def _should_use_image_round(self, preferred_category: str) -> bool:
+        if preferred_category not in {CATEGORY_RANDOM, 'География'}:
+            return False
+        return random.random() < 0.22
+
+    def _should_use_music_round(self, preferred_category: str) -> bool:
+        if preferred_category == 'Музыка':
+            return random.random() < 0.65
+        if preferred_category == CATEGORY_RANDOM:
+            return random.random() < 0.18
+        return False
+
+    def _pick_text_fallback_question(self, used_keys: Iterable[str], preferred_category: str) -> dict[str, Any]:
+        used_set = set(used_keys)
+
+        if preferred_category != CATEGORY_RANDOM:
+            pool = [item for item in TEXT_FALLBACK_QUESTIONS if item['category'] == preferred_category]
+            if not pool:
+                pool = TEXT_FALLBACK_QUESTIONS[:]
+        else:
+            pool = TEXT_FALLBACK_QUESTIONS[:]
+
+        candidates = [item for item in pool if self._question_key(item['question'], item['answer']) not in used_set]
+        if not candidates:
+            candidates = pool[:]
+        return random.choice(candidates).copy()
+
+    def _pick_image_question(self, used_keys: Iterable[str], preferred_category: str) -> dict[str, Any] | None:
+        used_set = set(used_keys)
+
+        if preferred_category != CATEGORY_RANDOM:
+            pool = [item for item in IMAGE_FALLBACK_QUESTIONS if item['category'] == preferred_category]
+        else:
+            pool = IMAGE_FALLBACK_QUESTIONS[:]
+
+        if not pool:
+            return None
+
+        candidates = [
+            item for item in pool
+            if self._question_key(item['question'], item['answer'], item.get('photo_url')) not in used_set
+        ]
+        if not candidates:
+            candidates = pool[:]
+
+        return random.choice(candidates).copy()
+
+    def _load_music_rounds(self) -> list[dict[str, Any]]:
+        path = Path('data/music_rounds.json')
+        if not path.exists():
+            logger.info('music_rounds.json not found, music rounds disabled until file is filled.')
+            return []
+
+        try:
+            raw = json.loads(path.read_text(encoding='utf-8'))
+        except Exception as exc:
+            logger.exception('Failed to parse music rounds file: %s', exc)
+            return []
+
+        if not isinstance(raw, list):
+            return []
+
+        items: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+
+            audio_path_raw = str(item.get('audio_path', '')).strip()
+            if not audio_path_raw:
+                continue
+
+            audio_path = Path(audio_path_raw)
+            if not audio_path.is_absolute():
+                audio_path = Path.cwd() / audio_path
+
+            if not audio_path.exists():
+                continue
+
+            normalized = {
+                'category': 'Музыка',
+                'difficulty': str(item.get('difficulty', 'medium')).strip().lower() or 'medium',
+                'question': str(item.get('question', 'Угадай трек или исполнителя по фрагменту.')).strip(),
+                'answer': str(item.get('answer', '')).strip(),
+                'aliases': [str(x).strip() for x in item.get('aliases', []) if str(x).strip()],
+                'hint': str(item.get('hint', 'Слушай внимательно.')).strip(),
+                'explanation': str(item.get('explanation', 'Это правильный музыкальный ответ.')).strip(),
+                'question_type': 'audio',
+                'audio_path': str(audio_path),
+                'audio_title': str(item.get('audio_title', 'Музыкальный раунд')).strip() or 'Музыкальный раунд',
+                'audio_performer': str(item.get('audio_performer', 'Quiz Bot')).strip() or 'Quiz Bot',
+            }
+
+            if not normalized['answer']:
+                continue
+
+            items.append(normalized)
+
+        logger.info('Loaded music rounds: %s', len(items))
+        return items
+
+    def _pick_music_round(self, used_keys: Iterable[str], preferred_category: str) -> dict[str, Any] | None:
+        used_set = set(used_keys)
+
+        if preferred_category in {CATEGORY_RANDOM, 'Музыка'}:
+            pool = self.music_rounds[:]
+        else:
+            pool = []
+
+        if not pool:
+            return None
+
+        candidates = [
+            item for item in pool
+            if self._question_key(item['question'], item['answer'], item.get('audio_path')) not in used_set
+        ]
+        if not candidates:
+            candidates = pool[:]
+
+        return random.choice(candidates).copy()

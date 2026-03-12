@@ -1,0 +1,346 @@
+﻿from __future__ import annotations
+
+import json
+import logging
+import random
+from typing import Any, Iterable
+
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+
+from app.config import settings
+from app.core.models import QuizQuestion
+from app.utils.text import normalize_text
+
+logger = logging.getLogger(__name__)
+
+CATEGORY_RANDOM = 'Случайно'
+SUPPORTED_CATEGORIES = ['География', 'Кино', 'Музыка', 'История', 'Технологии', 'Общие знания']
+
+SYSTEM_PROMPT = """
+Ты — генератор вопросов для Telegram-квиз бота.
+Верни РОВНО один JSON-объект без markdown, без пояснений и без лишнего текста.
+
+Жесткие правила:
+- вопрос должен быть однозначным
+- должен быть один основной правильный ответ
+- ответ должен быть коротким
+- не задавай спорные или субъективные вопросы
+- не используй слишком редкие факты
+- пиши по-русски
+- difficulty: easy, medium или hard
+- category: короткая строка
+- aliases: массив коротких альтернативных ответов
+- hint: полезная подсказка, но не прямой ответ
+- explanation: одно короткое предложение
+
+Формат:
+{
+  "category": "География",
+  "difficulty": "easy",
+  "question": "Столица Франции?",
+  "answer": "Париж",
+  "aliases": ["paris"],
+  "hint": "Город Эйфелевой башни.",
+  "explanation": "Париж — столица Франции."
+}
+""".strip()
+
+
+class QuestionPayload(BaseModel):
+    category: str = Field(min_length=2, max_length=50)
+    difficulty: str = Field(pattern='^(easy|medium|hard)$')
+    question: str = Field(min_length=8, max_length=300)
+    answer: str = Field(min_length=1, max_length=120)
+    aliases: list[str] = Field(default_factory=list)
+    hint: str = Field(min_length=3, max_length=200)
+    explanation: str = Field(min_length=3, max_length=250)
+
+
+FALLBACK_QUESTIONS = [
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Столица Франции?',
+        'answer': 'Париж',
+        'aliases': ['paris'],
+        'hint': 'Город Эйфелевой башни.',
+        'explanation': 'Париж — столица Франции.',
+    },
+    {
+        'category': 'География',
+        'difficulty': 'easy',
+        'question': 'Какая река протекает через Каир?',
+        'answer': 'Нил',
+        'aliases': [],
+        'hint': 'Одна из самых длинных рек мира.',
+        'explanation': 'Через Каир протекает Нил.',
+    },
+    {
+        'category': 'География',
+        'difficulty': 'medium',
+        'question': 'Какая страна имеет форму сапога на карте Европы?',
+        'answer': 'Италия',
+        'aliases': [],
+        'hint': 'Ее столица — Рим.',
+        'explanation': 'Италия известна своей формой, похожей на сапог.',
+    },
+    {
+        'category': 'Кино',
+        'difficulty': 'easy',
+        'question': 'Как зовут мальчика-волшебника со шрамом на лбу?',
+        'answer': 'Гарри Поттер',
+        'aliases': ['Поттер', 'Harry Potter'],
+        'hint': 'Учился в Хогвартсе.',
+        'explanation': 'Главный герой серии книг и фильмов — Гарри Поттер.',
+    },
+    {
+        'category': 'Кино',
+        'difficulty': 'easy',
+        'question': 'Как называется фильм о крушении большого лайнера и любви Джека и Розы?',
+        'answer': 'Титаник',
+        'aliases': ['Titanic'],
+        'hint': 'Фильм Джеймса Кэмерона 1997 года.',
+        'explanation': 'Это фильм «Титаник».',
+    },
+    {
+        'category': 'Кино',
+        'difficulty': 'medium',
+        'question': 'Как зовут зелёного персонажа из серии мультфильмов DreamWorks, живущего на болоте?',
+        'answer': 'Шрек',
+        'aliases': ['Shrek'],
+        'hint': 'У него есть друг Осёл.',
+        'explanation': 'Речь о Шреке.',
+    },
+    {
+        'category': 'Музыка',
+        'difficulty': 'medium',
+        'question': 'Какая группа исполнила песню «Bohemian Rhapsody»?',
+        'answer': 'Queen',
+        'aliases': ['Квин'],
+        'hint': 'Британская рок-группа с Фредди Меркьюри.',
+        'explanation': 'Песня «Bohemian Rhapsody» принадлежит группе Queen.',
+    },
+    {
+        'category': 'Музыка',
+        'difficulty': 'easy',
+        'question': 'Какой музыкальный инструмент имеет 88 клавиш в классическом варианте?',
+        'answer': 'Фортепиано',
+        'aliases': ['Пианино', 'Рояль'],
+        'hint': 'На нем играют двумя руками.',
+        'explanation': 'У классического фортепиано 88 клавиш.',
+    },
+    {
+        'category': 'Музыка',
+        'difficulty': 'easy',
+        'question': 'Как называется высокий мужской голос, чаще всего выше тенора?',
+        'answer': 'Контратенор',
+        'aliases': [],
+        'hint': 'Редкий высокий мужской вокальный диапазон.',
+        'explanation': 'Такой голос называется контратенор.',
+    },
+    {
+        'category': 'История',
+        'difficulty': 'medium',
+        'question': 'В каком городе находятся пирамиды Гизы?',
+        'answer': 'Гиза',
+        'aliases': ['Эль Гиза', 'Эль-Гиза'],
+        'hint': 'Город рядом с Каиром.',
+        'explanation': 'Пирамиды расположены на плато Гиза.',
+    },
+    {
+        'category': 'История',
+        'difficulty': 'easy',
+        'question': 'Кто был первым человеком, полетевшим в космос?',
+        'answer': 'Юрий Гагарин',
+        'aliases': ['Гагарин'],
+        'hint': 'Советский космонавт, полет состоялся в 1961 году.',
+        'explanation': 'Первым человеком в космосе стал Юрий Гагарин.',
+    },
+    {
+        'category': 'История',
+        'difficulty': 'easy',
+        'question': 'Как назывался корабль Христофора Колумба, самый известный из его экспедиции 1492 года?',
+        'answer': 'Санта-Мария',
+        'aliases': ['Санта Мария'],
+        'hint': 'Название из двух слов.',
+        'explanation': 'Самый известный корабль Колумба — «Санта-Мария».',
+    },
+    {
+        'category': 'Технологии',
+        'difficulty': 'easy',
+        'question': 'Как называется компания, создавшая Telegram?',
+        'answer': 'Telegram',
+        'aliases': [],
+        'hint': 'Название совпадает с названием мессенджера.',
+        'explanation': 'Мессенджер развивается одноименной компанией Telegram.',
+    },
+    {
+        'category': 'Технологии',
+        'difficulty': 'medium',
+        'question': 'Какой язык разметки используется для структуры веб-страниц?',
+        'answer': 'HTML',
+        'aliases': [],
+        'hint': 'Не язык программирования, а язык разметки.',
+        'explanation': 'Для структуры веб-страниц используется HTML.',
+    },
+    {
+        'category': 'Технологии',
+        'difficulty': 'easy',
+        'question': 'Как называется устройство для перемещения курсора на экране компьютера?',
+        'answer': 'Мышь',
+        'aliases': ['Компьютерная мышь'],
+        'hint': 'Обычно лежит рядом с клавиатурой.',
+        'explanation': 'Это компьютерная мышь.',
+    },
+    {
+        'category': 'Общие знания',
+        'difficulty': 'easy',
+        'question': 'Какая планета Солнечной системы самая большая?',
+        'answer': 'Юпитер',
+        'aliases': [],
+        'hint': 'Это газовый гигант.',
+        'explanation': 'Юпитер — крупнейшая планета Солнечной системы.',
+    },
+    {
+        'category': 'Общие знания',
+        'difficulty': 'easy',
+        'question': 'Сколько игроков одной команды находится на поле в футболе во время игры?',
+        'answer': '11',
+        'aliases': ['одиннадцать'],
+        'hint': 'Больше десяти, но меньше двенадцати.',
+        'explanation': 'На поле играют 11 футболистов от каждой команды.',
+    },
+    {
+        'category': 'Общие знания',
+        'difficulty': 'medium',
+        'question': 'Кто написал роман «Война и мир»?',
+        'answer': 'Лев Толстой',
+        'aliases': ['Толстой'],
+        'hint': 'Русский писатель XIX века.',
+        'explanation': 'Автор романа — Лев Николаевич Толстой.',
+    },
+]
+
+
+class LLMQuestionProvider:
+    def __init__(self) -> None:
+        self.client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        self.model = settings.openai_model
+
+    async def generate_question(self, used_keys: set[str], preferred_category: str = CATEGORY_RANDOM) -> QuizQuestion:
+        try:
+            payload = await self._generate_via_llm(used_keys=used_keys, preferred_category=preferred_category)
+            key = self._question_key(payload.question, payload.answer)
+            return QuizQuestion(**payload.model_dump(), key=key, source='llm')
+        except Exception as exc:
+            logger.exception('LLM question generation failed: %s', exc)
+            fallback = self._pick_fallback_question(used_keys=used_keys, preferred_category=preferred_category)
+            fallback['key'] = self._question_key(fallback['question'], fallback['answer'])
+            return QuizQuestion(**fallback, source='fallback')
+
+    async def _generate_via_llm(self, used_keys: set[str], preferred_category: str) -> QuestionPayload:
+        used_block = '\n'.join(f'- {item}' for item in list(used_keys)[-20:]) or '- повторов пока нет'
+
+        if preferred_category == CATEGORY_RANDOM:
+            category_instruction = (
+                'Выбери одну массово понятную категорию из списка: '
+                + ', '.join(SUPPORTED_CATEGORIES)
+                + '.'
+            )
+        else:
+            category_instruction = f'Категория должна быть строго: {preferred_category}.'
+
+        user_prompt = f"""
+Сгенерируй один вопрос для группового чата Telegram.
+
+Условия:
+- не повторять эти вопросы или их смысл:
+{used_block}
+- {category_instruction}
+- вопрос должен быть понятным большинству людей
+- уровень сложности: medium
+- верни только JSON
+""".strip()
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            temperature=0.6,
+            messages=[
+                {'role': 'system', 'content': SYSTEM_PROMPT},
+                {'role': 'user', 'content': user_prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content or ''
+        payload = self._parse_payload(content)
+
+        if preferred_category != CATEGORY_RANDOM:
+            payload.category = preferred_category
+        else:
+            payload.category = self._normalize_category(payload.category)
+
+        return payload
+
+    def _parse_payload(self, content: str) -> QuestionPayload:
+        raw = self._extract_json_object(content)
+        data: Any = json.loads(raw)
+
+        aliases = data.get('aliases', [])
+        if not isinstance(aliases, list):
+            aliases = [str(aliases)]
+
+        normalized = {
+            'category': str(data.get('category', 'Общие знания')).strip() or 'Общие знания',
+            'difficulty': str(data.get('difficulty', 'medium')).strip().lower() or 'medium',
+            'question': str(data.get('question', '')).strip(),
+            'answer': str(data.get('answer', '')).strip(),
+            'aliases': [str(item).strip() for item in aliases if str(item).strip()],
+            'hint': str(data.get('hint', '')).strip(),
+            'explanation': str(data.get('explanation', '')).strip(),
+        }
+        return QuestionPayload.model_validate(normalized)
+
+    def _extract_json_object(self, content: str) -> str:
+        raw = content.strip()
+
+        if raw.startswith('```'):
+            raw = raw.strip('`').strip()
+            if raw.lower().startswith('json'):
+                raw = raw[4:].strip()
+
+        first = raw.find('{')
+        last = raw.rfind('}')
+        if first == -1 or last == -1 or last <= first:
+            logger.warning('LLM raw response without JSON: %s', content[:500])
+            raise ValueError('LLM did not return a JSON object.')
+
+        return raw[first:last + 1]
+
+    def _normalize_category(self, category: str) -> str:
+        category_norm = normalize_text(category)
+        for item in SUPPORTED_CATEGORIES:
+            if normalize_text(item) == category_norm:
+                return item
+        return 'Общие знания'
+
+    def _question_key(self, question: str, answer: str) -> str:
+        return f'{normalize_text(question)}|{normalize_text(answer)}'
+
+    def _pick_fallback_question(self, used_keys: Iterable[str], preferred_category: str) -> dict[str, Any]:
+        used_set = set(used_keys)
+
+        if preferred_category != CATEGORY_RANDOM:
+            pool = [item for item in FALLBACK_QUESTIONS if item['category'] == preferred_category]
+            if not pool:
+                pool = FALLBACK_QUESTIONS[:]
+        else:
+            pool = FALLBACK_QUESTIONS[:]
+
+        candidates = [item for item in pool if self._question_key(item['question'], item['answer']) not in used_set]
+        if not candidates:
+            candidates = pool[:]
+        if not candidates:
+            candidates = FALLBACK_QUESTIONS[:]
+
+        return random.choice(candidates).copy()

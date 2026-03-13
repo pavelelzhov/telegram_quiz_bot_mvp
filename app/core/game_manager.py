@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import random
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -421,6 +420,9 @@ class GameManager:
             mode_label=self._mode_label(state.quiz_mode) if state else None,
             team_score_lines=team_lines,
         )
+        if state.quiz_mode == 'team2v2':
+            text += '\n\n' + '\n'.join(self.team_mode.team_score_lines(state))
+        return text
 
     def _leader_line(self, state: GameState) -> str:
         if not state.scores:

@@ -55,6 +55,23 @@ class ProductMissionsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(done_count, 4)
 
+    async def test_mission_rewards_do_not_add_extra_season_points(self) -> None:
+        for _ in range(5):
+            await self.store.note_match_result(
+                chat_id=2,
+                ranking=[(30, 'luna', 4), (31, 'sam', 1)],
+            )
+
+        player_before = await self.store._get_player(chat_id=2, user_id=30, username='luna')
+        self.assertEqual(int(player_before['season_points']), 30)
+
+        text = await self.store.get_player_text(chat_id=2, user_id=30, username='luna')
+        self.assertIn('🎁 Награды за миссии: только ачивки и титулы (без SP).', text)
+        self.assertIn('🎁 Миссия: сыграть 5 матчей', text)
+
+        player_after = await self.store._get_player(chat_id=2, user_id=30, username='luna')
+        self.assertEqual(int(player_after['season_points']), 30)
+
 
 if __name__ == '__main__':
     unittest.main()

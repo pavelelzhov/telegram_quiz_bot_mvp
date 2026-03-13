@@ -716,6 +716,7 @@ class GameManager:
             await self.db.save_game_result(
                 chat_id=chat_id,
                 finished_at=datetime.now(timezone.utc).isoformat(),
+                quiz_mode=state.quiz_mode,
                 winner_user_id=winner.user_id if winner else None,
                 winner_username=winner.username if winner else None,
                 winner_points=winner.points if winner else 0,

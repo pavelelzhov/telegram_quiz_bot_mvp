@@ -22,6 +22,7 @@
 - `/team_lobby`
 - `/team_start`
 - `/team_stop`
+- `/last_game`
 - `/hint`
 - `/skip`
 - `/score`

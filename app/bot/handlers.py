@@ -102,6 +102,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if text != 'OK':
             await message.answer(text, reply_markup=main_menu_kb())
 
+    async def _reply_if_error(message: Message, text: str) -> None:
+        if text != 'OK':
+            await message.answer(text, reply_markup=main_menu_kb())
+
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
         if not rows:
@@ -113,22 +117,45 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             lines.append(f'{idx}. @{username} — очки: {total_points}, победы: {wins}, игр: {games_played}')
         await message.answer('\n'.join(lines), reply_markup=main_menu_kb())
 
+    async def _send_season(message: Message) -> None:
+        text = await game_manager.get_season_product_text(message.chat.id)
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    async def _send_profile(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    async def _send_web_search(message: Message, raw_text: str) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        result = await web_search.search_and_summarize(
+            chat_title=message.chat.title or 'Чат',
+            username=username,
+            raw_text=raw_text,
+        )
+        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+
+    async def _send_score(message: Message) -> None:
+        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+
+    async def _send_status(message: Message) -> None:
+        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+
     @router.message(Command('start'))
     async def cmd_start(message: Message) -> None:
         await message.answer(_help_text(message.chat.id), reply_markup=main_menu_kb())
 
     @router.message(Command('season'))
     async def cmd_season(message: Message) -> None:
-        text = await game_manager.get_season_product_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_season(message)
 
     @router.message(Command('me'))
     async def cmd_me(message: Message) -> None:
-        if not message.from_user:
-            return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_profile(message)
 
     @router.message(Command('quiz_start'))
     async def cmd_quiz_start(message: Message, command: CommandObject) -> None:
@@ -148,36 +175,57 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_control_allowed(message):
             return
         text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена командой.')
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('quiz_status'))
     async def cmd_quiz_status(message: Message) -> None:
-        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_status(message)
 
     @router.message(Command('hint'))
     async def cmd_hint(message: Message) -> None:
         text = await game_manager.give_hint(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('skip'))
     async def cmd_skip(message: Message) -> None:
         text = await game_manager.skip_question(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('score'))
     async def cmd_score(message: Message) -> None:
-        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_score(message)
 
     @router.message(Command('stats'))
     async def cmd_stats(message: Message) -> None:
         await _send_top(message)
 
+    @router.message(Command('web'))
+    async def cmd_web(message: Message) -> None:
+        if not message.text:
+            return
+        await _send_web_search(message, message.text)
+
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:
         await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+
+    @router.message(Command('health'))
+    async def cmd_health(message: Message) -> None:
+        if not await _is_admin(message):
+            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
+            return
+
+        db_ok = await db.healthcheck()
+        llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
+        web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
+
+        text = (
+            '🩺 Health-check\n'
+            f'Database: {"OK" if db_ok else "FAIL"}\n'
+            f'LLM config: {"OK" if llm_configured else "MISSING"}\n'
+            f'Web search config: {"OK" if web_search_enabled else "DISABLED"}'
+        )
+        await message.answer(text, reply_markup=main_menu_kb())
 
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
@@ -193,16 +241,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🏅 Сезон')
     async def btn_season(message: Message) -> None:
-        text = await game_manager.get_season_product_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_season(message)
 
     @router.message(F.text == '🙋 Профиль')
     async def btn_profile(message: Message) -> None:
-        if not message.from_user:
-            return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_profile(message)
 
     @router.message(F.text.in_(list(BUTTON_TO_CATEGORY.keys())))
     async def btn_set_category(message: Message) -> None:
@@ -267,22 +310,20 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:
         text = await game_manager.give_hint(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text == '⏭ Пропустить')
     async def btn_skip(message: Message) -> None:
         text = await game_manager.skip_question(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text == '🏆 Очки')
     async def btn_score(message: Message) -> None:
-        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_score(message)
 
     @router.message(F.text == '📊 Статус')
     async def btn_status(message: Message) -> None:
-        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_status(message)
 
     @router.message(F.text == '👥 Топ')
     async def btn_stats(message: Message) -> None:
@@ -293,27 +334,21 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_control_allowed(message):
             return
         text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена кнопкой.')
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:
         if not message.from_user or not message.text:
             return
 
-        if message.text.startswith('/') or message.text in BUTTON_TEXTS:
+        if (message.text.startswith('/') and not message.text.startswith('/web')) or message.text in BUTTON_TEXTS:
             return
 
         username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
         addressed = await _is_addressed_to_bot(message)
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):
-            result = await web_search.search_and_summarize(
-                chat_title=message.chat.title or 'Чат',
-                username=username,
-                raw_text=message.text,
-            )
-            await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+            await _send_web_search(message, message.text)
             return
 
         answered = await game_manager.handle_answer(

@@ -162,6 +162,12 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         text = await game_manager.stop_game(message.bot, message.chat.id, reason)
         await _reply_if_error(message, text)
 
+    async def _toggle_setting(message: Message, toggler, label: str) -> None:
+        if not await _ensure_admin_for_setting(message):
+            return
+        enabled = toggler(message.chat.id)
+        await message.answer(f'{label}: {"вкл" if enabled else "выкл"}', reply_markup=main_menu_kb())
+
     @router.message(Command('start'))
     async def cmd_start(message: Message) -> None:
         await message.answer(_help_text(message.chat.id), reply_markup=main_menu_kb())
@@ -239,24 +245,6 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         )
         await message.answer(text, reply_markup=main_menu_kb())
 
-    @router.message(Command('health'))
-    async def cmd_health(message: Message) -> None:
-        if not await _is_admin(message):
-            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
-            return
-
-        db_ok = await db.healthcheck()
-        llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
-        web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
-
-        text = (
-            '🩺 Health-check\n'
-            f'Database: {"OK" if db_ok else "FAIL"}\n'
-            f'LLM config: {"OK" if llm_configured else "MISSING"}\n'
-            f'Web search config: {"OK" if web_search_enabled else "DISABLED"}'
-        )
-        await message.answer(text, reply_markup=main_menu_kb())
-
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
         await _start_quiz(message, 10, 'classic')
@@ -299,43 +287,19 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🖼 Картинки')
     async def btn_images(message: Message) -> None:
-        if not await _ensure_admin_for_setting(message):
-            return
-        enabled = game_manager.toggle_image_rounds(message.chat.id)
-        await message.answer(
-            f'🖼 Картинки: {"вкл" if enabled else "выкл"}',
-            reply_markup=main_menu_kb(),
-        )
+        await _toggle_setting(message, game_manager.toggle_image_rounds, '🖼 Картинки')
 
     @router.message(F.text == '🎧 Музыка-раунды')
     async def btn_music(message: Message) -> None:
-        if not await _ensure_admin_for_setting(message):
-            return
-        enabled = game_manager.toggle_music_rounds(message.chat.id)
-        await message.answer(
-            f'🎧 Музыка-раунды: {"вкл" if enabled else "выкл"}',
-            reply_markup=main_menu_kb(),
-        )
+        await _toggle_setting(message, game_manager.toggle_music_rounds, '🎧 Музыка-раунды')
 
     @router.message(F.text == '👮 Админ-режим')
     async def btn_admin_mode(message: Message) -> None:
-        if not await _ensure_admin_for_setting(message):
-            return
-        enabled = game_manager.toggle_admin_only_control(message.chat.id)
-        await message.answer(
-            f'👮 Только админ может старт/стоп: {"вкл" if enabled else "выкл"}',
-            reply_markup=main_menu_kb(),
-        )
+        await _toggle_setting(message, game_manager.toggle_admin_only_control, '👮 Только админ может старт/стоп')
 
     @router.message(F.text == '🤖 Host-режим')
     async def btn_host_mode(message: Message) -> None:
-        if not await _ensure_admin_for_setting(message):
-            return
-        enabled = game_manager.toggle_host_mode(message.chat.id)
-        await message.answer(
-            f'🤖 Host-режим: {"вкл" if enabled else "выкл"}',
-            reply_markup=main_menu_kb(),
-        )
+        await _toggle_setting(message, game_manager.toggle_host_mode, '🤖 Host-режим')
 
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:

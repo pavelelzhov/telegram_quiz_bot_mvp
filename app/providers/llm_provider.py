@@ -15,7 +15,6 @@ from app.config import settings
 from app.core.models import QuizQuestion
 from app.quiz.history_store import QuizHistoryStore
 from app.utils.ops_log import log_operation
-from app.utils.retry import retry_async
 from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)

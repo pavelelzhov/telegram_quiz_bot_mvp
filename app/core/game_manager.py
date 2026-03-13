@@ -14,12 +14,13 @@ from aiogram.types import FSInputFile
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.chat_config_service import ChatConfigService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.core.team_mode_service import TeamModeService
-from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
+from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
@@ -38,10 +39,9 @@ class GameManager:
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
+        self.chat_config = ChatConfigService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
-        self.preferred_categories: Dict[int, str] = {}
-        self.chat_settings: Dict[int, ChatSettings] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
             lambda: deque(maxlen=settings.recent_questions_limit)
         )
@@ -61,33 +61,17 @@ class GameManager:
         return self.games.get(chat_id)
 
     def get_chat_settings(self, chat_id: int) -> ChatSettings:
-        if chat_id not in self.chat_settings:
-            self.chat_settings[chat_id] = ChatSettings(question_timeout_sec=settings.question_timeout_sec)
-        return self.chat_settings[chat_id]
+        return self.chat_config.get_chat_settings(chat_id)
 
     def get_settings_text(self, chat_id: int) -> str:
         cfg = self.get_chat_settings(chat_id)
-        return (
-            '⚙️ Настройки чата\n'
-            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
-            f'Тема по умолчанию: {self.get_preferred_category(chat_id)}\n'
-            f'Таймер на вопрос: {cfg.question_timeout_sec} сек.\n'
-            f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
-            f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n'
-            f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
-            f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
-            f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
-        )
+        return self.chat_config.build_settings_text(chat_id, self.quiz_engine.game_profile_label(cfg.game_profile))
 
     def set_game_profile(self, chat_id: int, profile: str) -> bool:
-        if profile not in {'casual', 'standard', 'hardcore'}:
-            return False
-        cfg = self.get_chat_settings(chat_id)
-        cfg.game_profile = profile
-        return True
+        return self.chat_config.set_game_profile(chat_id, profile)
 
     def get_game_profile(self, chat_id: int) -> str:
-        return self.get_chat_settings(chat_id).game_profile
+        return self.chat_config.get_game_profile(chat_id)
 
     async def get_player_product_text(self, chat_id: int, user_id: int, username: str) -> str:
         return await self.product_store.get_player_text(chat_id, user_id, username)
@@ -96,40 +80,31 @@ class GameManager:
         return await self.product_store.get_season_text(chat_id)
 
     def cycle_timeout(self, chat_id: int) -> int:
-        cfg = self.get_chat_settings(chat_id)
-        values = [20, 30, 45]
-        try:
-            idx = values.index(cfg.question_timeout_sec)
-        except ValueError:
-            idx = 1
-        cfg.question_timeout_sec = values[(idx + 1) % len(values)]
-        return cfg.question_timeout_sec
+        return self.chat_config.cycle_timeout(chat_id)
 
     def toggle_image_rounds(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.image_rounds_enabled = not cfg.image_rounds_enabled
-        return cfg.image_rounds_enabled
+        return self.chat_config.toggle_image_rounds(chat_id)
 
     def toggle_music_rounds(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.music_rounds_enabled = not cfg.music_rounds_enabled
-        return cfg.music_rounds_enabled
+        return self.chat_config.toggle_music_rounds(chat_id)
 
     def toggle_admin_only_control(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.admin_only_control = not cfg.admin_only_control
-        return cfg.admin_only_control
+        return self.chat_config.toggle_admin_only_control(chat_id)
 
     def toggle_host_mode(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.host_mode_enabled = not cfg.host_mode_enabled
-        return cfg.host_mode_enabled
+        return self.chat_config.toggle_host_mode(chat_id)
 
     def set_preferred_category(self, chat_id: int, category: str) -> None:
-        self.preferred_categories[chat_id] = category
+        self.chat_config.set_preferred_category(chat_id, category)
 
     def get_preferred_category(self, chat_id: int) -> str:
-        return self.preferred_categories.get(chat_id, CATEGORY_RANDOM)
+        return self.chat_config.get_preferred_category(chat_id)
+
+    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
+        return self.team_mode.set_team_choice(chat_id, user_id, username, team)
+
+    def get_team_lobby_text(self, chat_id: int) -> str:
+        return self.team_mode.get_team_lobby_text(chat_id)
 
     def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
         return self.team_mode.set_team_choice(chat_id, user_id, username, team)

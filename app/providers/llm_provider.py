@@ -3,15 +3,19 @@
 import json
 import logging
 import random
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
 from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.core.models import QuizQuestion
 from app.quiz.history_store import QuizHistoryStore
+from app.utils.ops_log import log_operation
+from app.utils.retry import retry_async
 from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
@@ -123,7 +127,9 @@ class LLMQuestionProvider:
         allow_music_rounds: bool = True,
         stage: str = 'core',
         category_bias: dict[str, float] | None = None,
+        preferred_difficulty: str | None = None,
     ) -> QuizQuestion:
+        started = time.perf_counter()
         category = self._choose_category(chat_id, preferred_category, category_bias or {})
         round_type = self._choose_round_type(chat_id, category, stage, allow_image_rounds, allow_music_rounds)
 
@@ -140,6 +146,14 @@ class LLMQuestionProvider:
                 )
                 self._apply_stage_profile(question, stage)
                 self._remember_question(chat_id, question)
+                log_operation(
+                    logger,
+                    operation='question_generate',
+                    chat_id=chat_id,
+                    result='ok',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                )
                 return question
 
         if round_type == 'image':
@@ -152,12 +166,34 @@ class LLMQuestionProvider:
                 )
                 self._apply_stage_profile(question, stage)
                 self._remember_question(chat_id, question)
+                log_operation(
+                    logger,
+                    operation='question_generate',
+                    chat_id=chat_id,
+                    result='ok',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                )
                 return question
 
         try:
-            question = await self._generate_text_question(chat_id, recent_keys, category, stage)
+            question = await self._generate_text_question(
+                chat_id=chat_id,
+                recent_keys=recent_keys,
+                category=category,
+                stage=stage,
+                preferred_difficulty=preferred_difficulty,
+            )
             self._apply_stage_profile(question, stage)
             self._remember_question(chat_id, question)
+            log_operation(
+                logger,
+                operation='question_generate',
+                chat_id=chat_id,
+                result='ok',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+            )
             return question
         except Exception as exc:
             logger.exception('LLM question generation failed: %s', exc)
@@ -166,6 +202,16 @@ class LLMQuestionProvider:
             question = QuizQuestion(**fallback, source='fallback')
             self._apply_stage_profile(question, stage)
             self._remember_question(chat_id, question)
+            log_operation(
+                logger,
+                operation='question_generate',
+                chat_id=chat_id,
+                result='fallback',
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_type=type(exc).__name__,
+                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
+                level=logging.WARNING,
+            )
             return question
 
     def _apply_stage_profile(self, question: QuizQuestion, stage: str) -> None:
@@ -274,6 +320,7 @@ class LLMQuestionProvider:
         recent_keys: set[str],
         category: str,
         stage: str,
+        preferred_difficulty: str | None,
     ) -> QuizQuestion:
         recent_categories = self.history.recent_categories(chat_id, 6)
         recent_topics = self.history.recent_topics(chat_id, 12)
@@ -289,6 +336,7 @@ class LLMQuestionProvider:
                 recent_categories=recent_categories,
                 recent_topics=recent_topics,
                 recent_answers=recent_answers,
+                preferred_difficulty=preferred_difficulty,
             )
 
             for payload in candidates:
@@ -301,6 +349,7 @@ class LLMQuestionProvider:
                     recent_topics=recent_topics,
                     recent_answers=recent_answers,
                     stage=stage,
+                    preferred_difficulty=preferred_difficulty,
                 )
                 if score > best_score:
                     best_score = score
@@ -321,6 +370,7 @@ class LLMQuestionProvider:
         recent_categories: list[str],
         recent_topics: list[str],
         recent_answers: list[str],
+        preferred_difficulty: str | None,
     ) -> list[QuestionPayload]:
         recent_categories_block = ', '.join(recent_categories[-4:]) if recent_categories else 'нет'
         recent_topics_block = ', '.join(recent_topics[-8:]) if recent_topics else 'нет'
@@ -339,6 +389,7 @@ class LLMQuestionProvider:
 
 Требования:
 - целевая категория: {category}
+- целевая сложность: {preferred_difficulty or 'medium'}
 - стадия игры: {stage_instruction}
 - не использовать недавно встречавшиеся категории: {recent_categories_block}
 - не использовать недавно встречавшиеся темы: {recent_topics_block}
@@ -350,13 +401,18 @@ class LLMQuestionProvider:
 Верни только валидный JSON.
 """.strip()
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.9,
-            messages=[
-                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
-                {'role': 'user', 'content': user_prompt},
-            ],
+        response = await retry_async(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.9,
+                messages=[
+                    {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+            ),
+            retries=2,
+            base_delay_sec=0.8,
+            should_retry=self._should_retry_llm_error,
         )
 
         content = response.choices[0].message.content or ''
@@ -381,13 +437,18 @@ class LLMQuestionProvider:
 {broken_content}
 """.strip()
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.1,
-            messages=[
-                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
-                {'role': 'user', 'content': repair_prompt},
-            ],
+        response = await retry_async(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.1,
+                messages=[
+                    {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': repair_prompt},
+                ],
+            ),
+            retries=2,
+            base_delay_sec=0.8,
+            should_retry=self._should_retry_llm_error,
         )
 
         repaired = response.choices[0].message.content or ''
@@ -493,6 +554,7 @@ class LLMQuestionProvider:
         recent_topics: list[str],
         recent_answers: list[str],
         stage: str,
+        preferred_difficulty: str | None,
     ) -> float:
         if key in recent_keys:
             return -10_000.0
@@ -528,6 +590,9 @@ class LLMQuestionProvider:
         else:
             if payload.difficulty == 'medium':
                 score += 0.8
+
+        if preferred_difficulty and payload.difficulty == preferred_difficulty:
+            score += 0.35
 
         return score
 
@@ -640,3 +705,11 @@ class LLMQuestionProvider:
         if extra:
             base += f'|{normalize_text(extra)}'
         return base
+
+    def _should_retry_llm_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError)):
+            return True
+        if isinstance(exc, APIStatusError):
+            status = getattr(exc, 'status_code', None)
+            return bool(status in {429} or (isinstance(status, int) and status >= 500))
+        return False

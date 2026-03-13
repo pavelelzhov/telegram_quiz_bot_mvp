@@ -44,6 +44,19 @@ class QuizEngineServiceTests(unittest.TestCase):
         cfg_big = ChatSettings(question_timeout_sec=58)
         self.assertEqual(self.service.timeout_for_mode(self._state(quiz_mode='epic'), cfg_big), 60)
 
+    def test_timeout_respects_game_profile(self) -> None:
+        casual_cfg = ChatSettings(question_timeout_sec=30, game_profile='casual')
+        hardcore_cfg = ChatSettings(question_timeout_sec=30, game_profile='hardcore')
+
+        self.assertEqual(self.service.timeout_for_mode(self._state(quiz_mode='classic'), casual_cfg), 35)
+        self.assertEqual(self.service.timeout_for_mode(self._state(quiz_mode='classic'), hardcore_cfg), 25)
+
+    def test_game_profile_label(self) -> None:
+        self.assertEqual(self.service.game_profile_label('casual'), '😌 casual')
+        self.assertEqual(self.service.game_profile_label('standard'), '🎯 standard')
+        self.assertEqual(self.service.game_profile_label('hardcore'), '💀 hardcore')
+        self.assertEqual(self.service.game_profile_label('unknown'), '🎯 standard')
+
     def test_determine_stage_for_modes(self) -> None:
         blitz_state = self._state(quiz_mode='blitz', question_limit=7)
         self.assertEqual(self.service.determine_stage(blitz_state, 1), 'warmup')

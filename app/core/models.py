@@ -35,6 +35,7 @@ class PlayerScore:
 @dataclass(slots=True)
 class ChatSettings:
     question_timeout_sec: int = 30
+    game_profile: str = 'standard'
     image_rounds_enabled: bool = True
     music_rounds_enabled: bool = True
     admin_only_control: bool = False

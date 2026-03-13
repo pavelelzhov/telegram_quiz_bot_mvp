@@ -201,6 +201,35 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_quiz_status(message: Message) -> None:
         await _send_status(message)
 
+    @router.message(Command('quiz_profile'))
+    async def cmd_quiz_profile(message: Message, command: CommandObject) -> None:
+        if not command.args:
+            profile = game_manager.get_game_profile(message.chat.id)
+            await message.answer(
+                'Профиль игры: '
+                f'{game_manager.quiz_engine.game_profile_label(profile)}\n'
+                'Изменить: /quiz_profile casual|standard|hardcore',
+                reply_markup=main_menu_kb(),
+            )
+            return
+
+        if not await _ensure_admin_for_setting(message):
+            return
+
+        profile = command.args.strip().lower()
+        if not game_manager.set_game_profile(message.chat.id, profile):
+            await message.answer(
+                'Неверный профиль. Используй: casual, standard или hardcore.',
+                reply_markup=main_menu_kb(),
+            )
+            return
+
+        await message.answer(
+            'Профиль игры обновлён: '
+            f'{game_manager.quiz_engine.game_profile_label(profile)}',
+            reply_markup=main_menu_kb(),
+        )
+
     @router.message(Command('hint'))
     async def cmd_hint(message: Message) -> None:
         await _send_hint(message)

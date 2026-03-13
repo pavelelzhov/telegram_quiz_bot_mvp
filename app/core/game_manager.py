@@ -67,6 +67,7 @@ class GameManager:
         cfg = self.get_chat_settings(chat_id)
         return (
             '⚙️ Настройки чата\n'
+            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
             f'Тема по умолчанию: {self.get_preferred_category(chat_id)}\n'
             f'Таймер на вопрос: {cfg.question_timeout_sec} сек.\n'
             f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
@@ -75,6 +76,16 @@ class GameManager:
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
             f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
         )
+
+    def set_game_profile(self, chat_id: int, profile: str) -> bool:
+        if profile not in {'casual', 'standard', 'hardcore'}:
+            return False
+        cfg = self.get_chat_settings(chat_id)
+        cfg.game_profile = profile
+        return True
+
+    def get_game_profile(self, chat_id: int) -> str:
+        return self.get_chat_settings(chat_id).game_profile
 
     async def get_player_product_text(self, chat_id: int, user_id: int, username: str) -> str:
         return await self.product_store.get_player_text(chat_id, user_id, username)
@@ -162,6 +173,7 @@ class GameManager:
                     f'🎤 {mode_label} стартовал!\n\n'
                     f'Всего вопросов: {question_limit}\n'
                     f'Режим тем: {preferred_category}\n'
+                    f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
                     f'Время на вопрос: {cfg.question_timeout_sec} сек. (база)\n'
                     f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
                     f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n\n'
@@ -410,6 +422,7 @@ class GameManager:
         if not state or not state.is_active:
             return (
                 'Сейчас нет активной игры.\n'
+                f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
                 f'Тема для следующей игры: {self.get_preferred_category(chat_id)}\n'
                 f'Таймер: {cfg.question_timeout_sec} сек.\n'
                 f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
@@ -422,6 +435,7 @@ class GameManager:
         return (
             '📊 Статус игры\n'
             f'Режим: {self._mode_label(state.quiz_mode)}\n'
+            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
             f'Вопросов выдано: {state.asked_count}/{state.question_limit}\n'
             f'Тема: {state.preferred_category}\n'
             f'Игроков с очками: {len(state.scores)}\n'

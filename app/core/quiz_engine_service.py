@@ -4,6 +4,14 @@ from app.core.models import ChatSettings, GameState, QuizQuestion
 
 
 class QuizEngineService:
+    def game_profile_label(self, profile: str) -> str:
+        mapping = {
+            'casual': '😌 casual',
+            'standard': '🎯 standard',
+            'hardcore': '💀 hardcore',
+        }
+        return mapping.get(profile, '🎯 standard')
+
     def mode_label(self, quiz_mode: str) -> str:
         mapping = {
             'classic': '🎯 Классика',
@@ -14,6 +22,13 @@ class QuizEngineService:
 
     def timeout_for_mode(self, state: GameState, cfg: ChatSettings) -> int:
         timeout = cfg.question_timeout_sec
+        if cfg.game_profile == 'casual':
+            timeout += 5
+        elif cfg.game_profile == 'hardcore':
+            timeout -= 5
+
+        timeout = max(15, min(60, timeout))
+
         if state.quiz_mode == 'blitz':
             return max(15, timeout - 8)
         if state.quiz_mode == 'epic':

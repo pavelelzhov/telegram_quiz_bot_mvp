@@ -15,9 +15,11 @@ from app.agent.agent_reply_provider import AgentReplyProvider
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
+from app.core.quiz_engine_service import QuizEngineService
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
+from app.utils.ops_log import log_operation
 from app.utils.text import answer_match_details
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ class GameManager:
         self.agent_reply_provider = AgentReplyProvider()
         self.memory_store = MemoryStore()
         self.product_store = ProductStore()
+        self.quiz_engine = QuizEngineService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.preferred_categories: Dict[int, str] = {}
@@ -123,10 +126,18 @@ class GameManager:
         question_limit: int,
         quiz_mode: str = 'classic',
     ) -> str:
+        started = time.perf_counter()
         lock = self._get_start_lock(chat_id)
 
         async with lock:
             if chat_id in self.games and self.games[chat_id].is_active:
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='already_active',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
                 return 'Игра уже идет в этом чате. Сначала закончи текущую — этот квиз не любит бигамию 😏'
 
             self._clear_pending_invite(chat_id)
@@ -164,27 +175,33 @@ class GameManager:
             )
 
         await self._ask_next_question(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_start',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'question_limit': question_limit, 'quiz_mode': quiz_mode},
+        )
         return 'OK'
 
     def _mode_label(self, quiz_mode: str) -> str:
-        mapping = {
-            'classic': '🎯 Классика',
-            'blitz': '🔥 Блиц',
-            'epic': '👑 Эпик',
-        }
-        return mapping.get(quiz_mode, '🎯 Классика')
+        return self.quiz_engine.mode_label(quiz_mode)
 
     def _timeout_for_mode(self, state: GameState, cfg: ChatSettings) -> int:
-        timeout = cfg.question_timeout_sec
-        if state.quiz_mode == 'blitz':
-            return max(15, timeout - 8)
-        if state.quiz_mode == 'epic':
-            return min(60, timeout + 5)
-        return timeout
+        return self.quiz_engine.timeout_for_mode(state, cfg)
 
     async def stop_game(self, bot: Bot, chat_id: int, reason: str = 'Игра остановлена.') -> str:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state or not state.is_active:
+            log_operation(
+                logger,
+                operation='game_stop',
+                chat_id=chat_id,
+                result='no_active_game',
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
             return 'В этом чате нет активной игры.'
 
         state.is_active = False
@@ -192,6 +209,13 @@ class GameManager:
 
         await bot.send_message(chat_id, f'⛔ {reason}')
         await self._finalize_game(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_stop',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
         return 'OK'
 
     async def handle_answer(self, bot: Bot, chat_id: int, user_id: int, username: str, text: str) -> bool:
@@ -418,62 +442,10 @@ class GameManager:
         return f'\n🏁 Лидер сейчас: @{leader.username} — {leader.points}'
 
     def _determine_stage(self, state: GameState, question_number: int) -> str:
-        total = state.question_limit
-
-        if state.quiz_mode == 'blitz':
-            if question_number == total:
-                return 'finale'
-            if question_number <= 2:
-                return 'warmup'
-            if question_number in {3, 5}:
-                return 'special'
-            return 'core'
-
-        if state.quiz_mode == 'epic':
-            if question_number == total:
-                return 'finale'
-            if question_number <= 2:
-                return 'warmup'
-            if question_number in {4, 8, 10}:
-                return 'special'
-            return 'core'
-
-        if question_number == total:
-            return 'finale'
-        if question_number <= min(2, total):
-            return 'warmup'
-        special_slot = max(3, (total // 2) + 1)
-        if question_number == special_slot and question_number < total:
-            return 'special'
-        return 'core'
+        return self.quiz_engine.determine_stage(state, question_number)
 
     def _apply_mode_profile(self, question: QuizQuestion, state: GameState, stage: str) -> None:
-        if stage == 'warmup':
-            question.round_label = '🔥 Разогрев'
-            question.point_value = 1
-        elif stage == 'special':
-            if question.question_type == 'audio':
-                question.round_label = '🎧 Спецраунд x2'
-            elif question.question_type == 'image':
-                question.round_label = '🖼 Спецраунд x2'
-            else:
-                question.round_label = '⚡ Спецраунд x2'
-            question.point_value = 2
-        elif stage == 'finale':
-            if state.quiz_mode == 'epic':
-                question.round_label = '👑 Финальный босс x3'
-                question.point_value = 3
-            else:
-                question.round_label = '👑 Финальный x2'
-                question.point_value = 2
-        else:
-            question.round_label = '🎯 Основной раунд'
-            question.point_value = 1
-
-        if state.quiz_mode == 'blitz' and stage == 'core':
-            question.round_label = '⚡ Блиц-раунд'
-        if state.quiz_mode == 'epic' and stage == 'core':
-            question.round_label = '🧩 Эпик-раунд'
+        self.quiz_engine.apply_mode_profile(question, state, stage)
 
     async def _ask_next_question(self, bot: Bot, chat_id: int) -> None:
         state = self.games.get(chat_id)
@@ -598,6 +570,7 @@ class GameManager:
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state:
             return
@@ -640,6 +613,14 @@ class GameManager:
             logger.exception('Failed to save game result: %s', exc)
 
         self.games.pop(chat_id, None)
+        log_operation(
+            logger,
+            operation='game_finalize',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'players': len(ranking), 'asked_count': state.asked_count},
+        )
 
     def _cancel_question_task(self, chat_id: int) -> None:
         task = self.question_tasks.pop(chat_id, None)

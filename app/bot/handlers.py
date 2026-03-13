@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 
+logger = logging.getLogger(__name__)
+
+
 def build_router(game_manager: GameManager, db: Database) -> Router:
     router = Router()
     bot_username_cache: dict[str, str | None] = {'value': None}

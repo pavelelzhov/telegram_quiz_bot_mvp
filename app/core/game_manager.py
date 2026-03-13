@@ -13,6 +13,7 @@ from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
 from app.core.answer_flow_service import AnswerFlowService
 from app.core.chat_config_service import ChatConfigService
+from app.core.chat_history_service import ChatHistoryService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
@@ -48,14 +49,13 @@ class GameManager:
         self.quiz_engine = QuizEngineService()
         self.chat_config = ChatConfigService()
         self.round_lifecycle = RoundLifecycleService()
+        self.chat_history = ChatHistoryService(max_items=20)
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
             lambda: deque(maxlen=settings.recent_questions_limit)
         )
         self.start_locks: Dict[int, asyncio.Lock] = {}
-        self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
-        self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
         self.team_mode = TeamModeService()
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
@@ -291,7 +291,7 @@ class GameManager:
         if not cfg.chat_mode_enabled:
             return False
 
-        self._remember_chat_message(chat_id, 'user', username, text)
+        self.chat_history.remember_message(chat_id, 'user', username, text)
         self._remember_activity(chat_id, user_id, username, text)
         self.memory_store.note_message(chat_id, user_id, username, text)
 
@@ -317,7 +317,7 @@ class GameManager:
         if cooldown is None:
             return False
 
-        if now - self.chat_last_reply_ts[chat_id] < cooldown:
+        if not self.chat_history.can_reply(chat_id, now, cooldown):
             return False
 
         if not addressed:
@@ -335,7 +335,7 @@ class GameManager:
             user_id=user_id,
             username=username,
             text=text,
-            history=list(self.chat_histories[chat_id]),
+            history=self.chat_history.get_history(chat_id),
             quiz_active=quiz_active,
             current_question_text=current_question_text,
             addressed=addressed,
@@ -343,8 +343,8 @@ class GameManager:
         if not reply:
             return False
 
-        self.chat_last_reply_ts[chat_id] = now
-        self._remember_chat_message(chat_id, 'assistant', 'quiz_bot', reply)
+        self.chat_history.mark_reply(chat_id, now)
+        self.chat_history.remember_message(chat_id, 'assistant', 'quiz_bot', reply)
         await bot.send_message(chat_id, reply)
         return True
 
@@ -561,12 +561,6 @@ class GameManager:
     def _clear_pending_invite(self, chat_id: int) -> None:
         self.invite_service.clear_pending_invite(chat_id)
 
-    def _remember_chat_message(self, chat_id: int, role: str, speaker: str, text: str) -> None:
-        value = text.strip()
-        if not value:
-            return
-        self.chat_histories[chat_id].append({'role': role, 'speaker': speaker, 'text': value[:500]})
-
     def _remember_activity(self, chat_id: int, user_id: int, username: str, text: str) -> None:
         self.invite_service.remember_activity(chat_id, user_id, username, text)
 
@@ -582,7 +576,7 @@ class GameManager:
     async def _maybe_send_host_invite(self, bot: Bot, chat_id: int, user_id: int) -> bool:
         invited = await self.invite_service.maybe_send_host_invite(bot, chat_id, user_id)
         if invited:
-            self.chat_last_reply_ts[chat_id] = time.time()
+            self.chat_history.mark_reply(chat_id, time.time())
         return invited
 
     async def _handle_pending_invite_vote(self, bot: Bot, chat_id: int, user_id: int, text: str) -> bool:

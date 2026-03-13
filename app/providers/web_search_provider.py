@@ -12,6 +12,7 @@ from openai import AsyncOpenAI
 
 from app.config import settings
 from app.utils.ops_log import log_operation
+from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
 

@@ -180,7 +180,6 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_web(message: Message) -> None:
         if not message.from_user or not message.text:
             return
-
         username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
         result = await web_search.search_and_summarize(
             chat_title=message.chat.title or 'Чат',

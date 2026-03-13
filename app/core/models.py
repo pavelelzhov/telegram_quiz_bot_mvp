@@ -55,6 +55,7 @@ class GameState:
     current_question_answered: bool = False
     current_question_started_ts: float = 0.0
     scores: Dict[int, PlayerScore] = field(default_factory=dict)
+    team_assignments: Dict[int, str] = field(default_factory=dict)
     used_question_keys: Set[str] = field(default_factory=set)
     hints_used_for_current_question: int = 0
     near_miss_user_ids: Set[int] = field(default_factory=set)

@@ -337,12 +337,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         addressed = await _is_addressed_to_bot(message)
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):
-            result = await web_search.search_and_summarize(
-                chat_title=message.chat.title or 'Чат',
-                username=username,
-                raw_text=message.text,
-            )
-            await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+            await _send_web_result(message, message.text)
             return
 
         answered = await game_manager.handle_answer(

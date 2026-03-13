@@ -99,3 +99,12 @@ class Database:
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    async def healthcheck(self) -> bool:
+        try:
+            async with aiosqlite.connect(self.path) as db:
+                async with db.execute('SELECT 1') as cursor:
+                    row = await cursor.fetchone()
+                    return bool(row and row[0] == 1)
+        except Exception:
+            return False

@@ -192,6 +192,24 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_settings(message: Message) -> None:
         await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
 
+    @router.message(Command('health'))
+    async def cmd_health(message: Message) -> None:
+        if not await _is_admin(message):
+            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
+            return
+
+        db_ok = await db.healthcheck()
+        llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
+        web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
+
+        text = (
+            '🩺 Health-check\n'
+            f'Database: {"OK" if db_ok else "FAIL"}\n'
+            f'LLM config: {"OK" if llm_configured else "MISSING"}\n'
+            f'Web search config: {"OK" if web_search_enabled else "DISABLED"}'
+        )
+        await message.answer(text, reply_markup=main_menu_kb())
+
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
         await _start_quiz(message, 10, 'classic')

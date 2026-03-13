@@ -13,6 +13,7 @@ from aiogram.types import FSInputFile
 
 from app.agent.memory_store import MemoryStore
 from app.config import settings
+from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
@@ -33,6 +34,7 @@ class GameManager:
         self.memory_store = MemoryStore()
         self.chat_agent_service = ChatAgentService(self.memory_store)
         self.invite_service = InviteService()
+        self.adaptive_difficulty = AdaptiveDifficultyService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.games: Dict[int, GameState] = {}
@@ -226,18 +228,21 @@ class GameManager:
         verdict = answer_match_details(text, state.current_question.answer, state.current_question.aliases)
 
         if verdict == 'wrong':
+            self.adaptive_difficulty.note_wrong(chat_id)
             if user_id not in state.wrong_reply_user_ids and len(state.wrong_reply_user_ids) < 3:
                 state.wrong_reply_user_ids.add(user_id)
                 await bot.send_message(chat_id, self._wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
+            self.adaptive_difficulty.note_close(chat_id)
             if user_id not in state.near_miss_user_ids:
                 state.near_miss_user_ids.add(user_id)
                 await bot.send_message(chat_id, self._near_miss_text(username, state.current_question))
             return False
 
         state.current_question_answered = True
+        self.adaptive_difficulty.note_correct(chat_id)
         score = state.scores.setdefault(user_id, PlayerScore(user_id=user_id, username=username))
         score.username = username
         score.points += state.current_question.point_value
@@ -455,6 +460,7 @@ class GameManager:
 
         next_number = state.asked_count + 1
         stage = self._determine_stage(state, next_number)
+        target_difficulty = self.adaptive_difficulty.target_difficulty(chat_id, state.asked_count)
 
         try:
             question = await self.question_provider.generate_question(
@@ -464,6 +470,7 @@ class GameManager:
                 allow_image_rounds=cfg.image_rounds_enabled,
                 allow_music_rounds=cfg.music_rounds_enabled,
                 stage=stage,
+                preferred_difficulty=target_difficulty,
             )
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
@@ -560,6 +567,7 @@ class GameManager:
                 f'Факт: {state.current_question.explanation}'
             ),
         )
+        self.adaptive_difficulty.note_timeout(chat_id)
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:

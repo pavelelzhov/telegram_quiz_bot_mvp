@@ -127,6 +127,7 @@ class LLMQuestionProvider:
         allow_music_rounds: bool = True,
         stage: str = 'core',
         category_bias: dict[str, float] | None = None,
+        preferred_difficulty: str | None = None,
     ) -> QuizQuestion:
         started = time.perf_counter()
         category = self._choose_category(chat_id, preferred_category, category_bias or {})
@@ -176,7 +177,13 @@ class LLMQuestionProvider:
                 return question
 
         try:
-            question = await self._generate_text_question(chat_id, recent_keys, category, stage)
+            question = await self._generate_text_question(
+                chat_id=chat_id,
+                recent_keys=recent_keys,
+                category=category,
+                stage=stage,
+                preferred_difficulty=preferred_difficulty,
+            )
             self._apply_stage_profile(question, stage)
             self._remember_question(chat_id, question)
             log_operation(
@@ -313,6 +320,7 @@ class LLMQuestionProvider:
         recent_keys: set[str],
         category: str,
         stage: str,
+        preferred_difficulty: str | None,
     ) -> QuizQuestion:
         recent_categories = self.history.recent_categories(chat_id, 6)
         recent_topics = self.history.recent_topics(chat_id, 12)
@@ -328,6 +336,7 @@ class LLMQuestionProvider:
                 recent_categories=recent_categories,
                 recent_topics=recent_topics,
                 recent_answers=recent_answers,
+                preferred_difficulty=preferred_difficulty,
             )
 
             for payload in candidates:
@@ -340,6 +349,7 @@ class LLMQuestionProvider:
                     recent_topics=recent_topics,
                     recent_answers=recent_answers,
                     stage=stage,
+                    preferred_difficulty=preferred_difficulty,
                 )
                 if score > best_score:
                     best_score = score
@@ -360,6 +370,7 @@ class LLMQuestionProvider:
         recent_categories: list[str],
         recent_topics: list[str],
         recent_answers: list[str],
+        preferred_difficulty: str | None,
     ) -> list[QuestionPayload]:
         recent_categories_block = ', '.join(recent_categories[-4:]) if recent_categories else 'нет'
         recent_topics_block = ', '.join(recent_topics[-8:]) if recent_topics else 'нет'
@@ -378,6 +389,7 @@ class LLMQuestionProvider:
 
 Требования:
 - целевая категория: {category}
+- целевая сложность: {preferred_difficulty or 'medium'}
 - стадия игры: {stage_instruction}
 - не использовать недавно встречавшиеся категории: {recent_categories_block}
 - не использовать недавно встречавшиеся темы: {recent_topics_block}
@@ -542,6 +554,7 @@ class LLMQuestionProvider:
         recent_topics: list[str],
         recent_answers: list[str],
         stage: str,
+        preferred_difficulty: str | None,
     ) -> float:
         if key in recent_keys:
             return -10_000.0
@@ -577,6 +590,9 @@ class LLMQuestionProvider:
         else:
             if payload.difficulty == 'medium':
                 score += 0.8
+
+        if preferred_difficulty and payload.difficulty == preferred_difficulty:
+            score += 0.35
 
         return score
 

@@ -11,13 +11,17 @@ from typing import Deque, Dict, Optional
 from aiogram import Bot
 from aiogram.types import FSInputFile
 
-from app.agent.agent_reply_provider import AgentReplyProvider
 from app.agent.memory_store import MemoryStore
 from app.config import settings
+from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.chat_agent_service import ChatAgentService
+from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
+from app.core.quiz_engine_service import QuizEngineService
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
+from app.utils.ops_log import log_operation
 from app.utils.text import answer_match_details
 
 logger = logging.getLogger(__name__)
@@ -27,9 +31,12 @@ class GameManager:
     def __init__(self, db: Database, question_provider: LLMQuestionProvider) -> None:
         self.db = db
         self.question_provider = question_provider
-        self.agent_reply_provider = AgentReplyProvider()
         self.memory_store = MemoryStore()
+        self.chat_agent_service = ChatAgentService(self.memory_store)
+        self.invite_service = InviteService()
+        self.adaptive_difficulty = AdaptiveDifficultyService()
         self.product_store = ProductStore()
+        self.quiz_engine = QuizEngineService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.preferred_categories: Dict[int, str] = {}
@@ -40,10 +47,6 @@ class GameManager:
         self.start_locks: Dict[int, asyncio.Lock] = {}
         self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
         self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
-        self.chat_last_invite_ts: Dict[int, float] = defaultdict(lambda: 0.0)
-        self.chat_activity: Dict[int, Deque[dict[str, object]]] = defaultdict(lambda: deque(maxlen=60))
-        self.pending_invites: Dict[int, dict] = {}
-        self.invite_tasks: Dict[int, asyncio.Task] = {}
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.start_locks.get(chat_id)
@@ -64,6 +67,7 @@ class GameManager:
         cfg = self.get_chat_settings(chat_id)
         return (
             '⚙️ Настройки чата\n'
+            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
             f'Тема по умолчанию: {self.get_preferred_category(chat_id)}\n'
             f'Таймер на вопрос: {cfg.question_timeout_sec} сек.\n'
             f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
@@ -72,6 +76,16 @@ class GameManager:
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
             f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
         )
+
+    def set_game_profile(self, chat_id: int, profile: str) -> bool:
+        if profile not in {'casual', 'standard', 'hardcore'}:
+            return False
+        cfg = self.get_chat_settings(chat_id)
+        cfg.game_profile = profile
+        return True
+
+    def get_game_profile(self, chat_id: int) -> str:
+        return self.get_chat_settings(chat_id).game_profile
 
     async def get_player_product_text(self, chat_id: int, user_id: int, username: str) -> str:
         return await self.product_store.get_player_text(chat_id, user_id, username)
@@ -123,10 +137,18 @@ class GameManager:
         question_limit: int,
         quiz_mode: str = 'classic',
     ) -> str:
+        started = time.perf_counter()
         lock = self._get_start_lock(chat_id)
 
         async with lock:
             if chat_id in self.games and self.games[chat_id].is_active:
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='already_active',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                )
                 return 'Игра уже идет в этом чате. Сначала закончи текущую — этот квиз не любит бигамию 😏'
 
             self._clear_pending_invite(chat_id)
@@ -151,6 +173,7 @@ class GameManager:
                     f'🎤 {mode_label} стартовал!\n\n'
                     f'Всего вопросов: {question_limit}\n'
                     f'Режим тем: {preferred_category}\n'
+                    f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
                     f'Время на вопрос: {cfg.question_timeout_sec} сек. (база)\n'
                     f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
                     f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n\n'
@@ -164,27 +187,33 @@ class GameManager:
             )
 
         await self._ask_next_question(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_start',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'question_limit': question_limit, 'quiz_mode': quiz_mode},
+        )
         return 'OK'
 
     def _mode_label(self, quiz_mode: str) -> str:
-        mapping = {
-            'classic': '🎯 Классика',
-            'blitz': '🔥 Блиц',
-            'epic': '👑 Эпик',
-        }
-        return mapping.get(quiz_mode, '🎯 Классика')
+        return self.quiz_engine.mode_label(quiz_mode)
 
     def _timeout_for_mode(self, state: GameState, cfg: ChatSettings) -> int:
-        timeout = cfg.question_timeout_sec
-        if state.quiz_mode == 'blitz':
-            return max(15, timeout - 8)
-        if state.quiz_mode == 'epic':
-            return min(60, timeout + 5)
-        return timeout
+        return self.quiz_engine.timeout_for_mode(state, cfg)
 
     async def stop_game(self, bot: Bot, chat_id: int, reason: str = 'Игра остановлена.') -> str:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state or not state.is_active:
+            log_operation(
+                logger,
+                operation='game_stop',
+                chat_id=chat_id,
+                result='no_active_game',
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
             return 'В этом чате нет активной игры.'
 
         state.is_active = False
@@ -192,6 +221,13 @@ class GameManager:
 
         await bot.send_message(chat_id, f'⛔ {reason}')
         await self._finalize_game(bot, chat_id)
+        log_operation(
+            logger,
+            operation='game_stop',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
         return 'OK'
 
     async def handle_answer(self, bot: Bot, chat_id: int, user_id: int, username: str, text: str) -> bool:
@@ -204,18 +240,21 @@ class GameManager:
         verdict = answer_match_details(text, state.current_question.answer, state.current_question.aliases)
 
         if verdict == 'wrong':
+            self.adaptive_difficulty.note_wrong(chat_id)
             if user_id not in state.wrong_reply_user_ids and len(state.wrong_reply_user_ids) < 3:
                 state.wrong_reply_user_ids.add(user_id)
                 await bot.send_message(chat_id, self._wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
+            self.adaptive_difficulty.note_close(chat_id)
             if user_id not in state.near_miss_user_ids:
                 state.near_miss_user_ids.add(user_id)
                 await bot.send_message(chat_id, self._near_miss_text(username, state.current_question))
             return False
 
         state.current_question_answered = True
+        self.adaptive_difficulty.note_correct(chat_id)
         score = state.scores.setdefault(user_id, PlayerScore(user_id=user_id, username=username))
         score.username = username
         score.points += state.current_question.point_value
@@ -312,21 +351,16 @@ class GameManager:
             if random.random() > 0.18:
                 return False
 
-        mode = self._detect_agent_mode(text)
-        user_memory = self.memory_store.get_user_summary(chat_id, user_id, username)
-        chat_memory = self.memory_store.get_chat_summary(chat_id)
-
-        reply = await self.agent_reply_provider.generate_reply(
+        reply = await self.chat_agent_service.generate_reply(
+            chat_id=chat_id,
             chat_title=chat_title,
+            user_id=user_id,
             username=username,
-            user_text=text,
+            text=text,
             history=list(self.chat_histories[chat_id]),
             quiz_active=quiz_active,
             current_question_text=current_question_text,
             addressed=addressed,
-            user_memory=user_memory,
-            chat_memory=chat_memory,
-            mode=mode,
         )
         if not reply:
             return False
@@ -388,6 +422,7 @@ class GameManager:
         if not state or not state.is_active:
             return (
                 'Сейчас нет активной игры.\n'
+                f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
                 f'Тема для следующей игры: {self.get_preferred_category(chat_id)}\n'
                 f'Таймер: {cfg.question_timeout_sec} сек.\n'
                 f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
@@ -400,6 +435,7 @@ class GameManager:
         return (
             '📊 Статус игры\n'
             f'Режим: {self._mode_label(state.quiz_mode)}\n'
+            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
             f'Вопросов выдано: {state.asked_count}/{state.question_limit}\n'
             f'Тема: {state.preferred_category}\n'
             f'Игроков с очками: {len(state.scores)}\n'
@@ -418,62 +454,10 @@ class GameManager:
         return f'\n🏁 Лидер сейчас: @{leader.username} — {leader.points}'
 
     def _determine_stage(self, state: GameState, question_number: int) -> str:
-        total = state.question_limit
-
-        if state.quiz_mode == 'blitz':
-            if question_number == total:
-                return 'finale'
-            if question_number <= 2:
-                return 'warmup'
-            if question_number in {3, 5}:
-                return 'special'
-            return 'core'
-
-        if state.quiz_mode == 'epic':
-            if question_number == total:
-                return 'finale'
-            if question_number <= 2:
-                return 'warmup'
-            if question_number in {4, 8, 10}:
-                return 'special'
-            return 'core'
-
-        if question_number == total:
-            return 'finale'
-        if question_number <= min(2, total):
-            return 'warmup'
-        special_slot = max(3, (total // 2) + 1)
-        if question_number == special_slot and question_number < total:
-            return 'special'
-        return 'core'
+        return self.quiz_engine.determine_stage(state, question_number)
 
     def _apply_mode_profile(self, question: QuizQuestion, state: GameState, stage: str) -> None:
-        if stage == 'warmup':
-            question.round_label = '🔥 Разогрев'
-            question.point_value = 1
-        elif stage == 'special':
-            if question.question_type == 'audio':
-                question.round_label = '🎧 Спецраунд x2'
-            elif question.question_type == 'image':
-                question.round_label = '🖼 Спецраунд x2'
-            else:
-                question.round_label = '⚡ Спецраунд x2'
-            question.point_value = 2
-        elif stage == 'finale':
-            if state.quiz_mode == 'epic':
-                question.round_label = '👑 Финальный босс x3'
-                question.point_value = 3
-            else:
-                question.round_label = '👑 Финальный x2'
-                question.point_value = 2
-        else:
-            question.round_label = '🎯 Основной раунд'
-            question.point_value = 1
-
-        if state.quiz_mode == 'blitz' and stage == 'core':
-            question.round_label = '⚡ Блиц-раунд'
-        if state.quiz_mode == 'epic' and stage == 'core':
-            question.round_label = '🧩 Эпик-раунд'
+        self.quiz_engine.apply_mode_profile(question, state, stage)
 
     async def _ask_next_question(self, bot: Bot, chat_id: int) -> None:
         state = self.games.get(chat_id)
@@ -490,6 +474,7 @@ class GameManager:
 
         next_number = state.asked_count + 1
         stage = self._determine_stage(state, next_number)
+        target_difficulty = self.adaptive_difficulty.target_difficulty(chat_id, state.asked_count)
 
         try:
             question = await self.question_provider.generate_question(
@@ -499,6 +484,7 @@ class GameManager:
                 allow_image_rounds=cfg.image_rounds_enabled,
                 allow_music_rounds=cfg.music_rounds_enabled,
                 stage=stage,
+                preferred_difficulty=target_difficulty,
             )
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
@@ -595,9 +581,11 @@ class GameManager:
                 f'Факт: {state.current_question.explanation}'
             ),
         )
+        self.adaptive_difficulty.note_timeout(chat_id)
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:
+        started = time.perf_counter()
         state = self.games.get(chat_id)
         if not state:
             return
@@ -640,6 +628,14 @@ class GameManager:
             logger.exception('Failed to save game result: %s', exc)
 
         self.games.pop(chat_id, None)
+        log_operation(
+            logger,
+            operation='game_finalize',
+            chat_id=chat_id,
+            result='ok',
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={'players': len(ranking), 'asked_count': state.asked_count},
+        )
 
     def _cancel_question_task(self, chat_id: int) -> None:
         task = self.question_tasks.pop(chat_id, None)
@@ -647,13 +643,10 @@ class GameManager:
             task.cancel()
 
     def _cancel_invite_task(self, chat_id: int) -> None:
-        task = self.invite_tasks.pop(chat_id, None)
-        if task and not task.done():
-            task.cancel()
+        self.invite_service.cancel_invite_task(chat_id)
 
     def _clear_pending_invite(self, chat_id: int) -> None:
-        self.pending_invites.pop(chat_id, None)
-        self._cancel_invite_task(chat_id)
+        self.invite_service.clear_pending_invite(chat_id)
 
     def _remember_chat_message(self, chat_id: int, role: str, speaker: str, text: str) -> None:
         value = text.strip()
@@ -662,105 +655,34 @@ class GameManager:
         self.chat_histories[chat_id].append({'role': role, 'speaker': speaker, 'text': value[:500]})
 
     def _remember_activity(self, chat_id: int, user_id: int, username: str, text: str) -> None:
-        self.chat_activity[chat_id].append(
-            {'ts': time.time(), 'user_id': user_id, 'username': username, 'text': text[:300]}
-        )
+        self.invite_service.remember_activity(chat_id, user_id, username, text)
 
     def _recent_unique_user_count(self, chat_id: int, window_sec: int) -> int:
-        cutoff = time.time() - window_sec
-        users = {
-            int(item['user_id'])
-            for item in self.chat_activity[chat_id]
-            if float(item['ts']) >= cutoff
-        }
-        return len(users)
+        return self.invite_service.recent_unique_user_count(chat_id, window_sec)
 
     def _recent_message_count(self, chat_id: int, window_sec: int) -> int:
-        cutoff = time.time() - window_sec
-        return sum(1 for item in self.chat_activity[chat_id] if float(item['ts']) >= cutoff)
+        return self.invite_service.recent_message_count(chat_id, window_sec)
 
     def _is_join_intent(self, text: str) -> bool:
-        value = text.strip().lower()
-        intents = {
-            '+', '++', 'го', 'да', 'ага', 'погнали', 'запускай', 'старт',
-            'го квиз', 'давай квиз', 'квиз', 'погнали квиз'
-        }
-        return value in intents
-
-    def _detect_agent_mode(self, text: str) -> str:
-        lowered = text.lower()
-
-        support_tokens = [
-            'мне плохо', 'тревожно', 'паника', 'паническую', 'устал', 'не вывожу',
-            'одиноко', 'грустно', 'тяжело', 'накрывает', 'депресс', 'разбит'
-        ]
-        if any(token in lowered for token in support_tokens):
-            return 'support'
-
-        roast_tokens = ['обосри', 'прожарь', 'роаст', 'разнеси меня', 'поругай меня', 'обругай']
-        if any(token in lowered for token in roast_tokens):
-            return 'roast'
-
-        return 'chat'
+        return self.invite_service.is_join_intent(text)
 
     async def _maybe_send_host_invite(self, bot: Bot, chat_id: int, user_id: int) -> bool:
-        if chat_id in self.pending_invites:
-            return False
-        if time.time() - self.chat_last_invite_ts[chat_id] < 600:
-            return False
-        if self._recent_unique_user_count(chat_id, 180) < 2:
-            return False
-        if self._recent_message_count(chat_id, 180) < 6:
-            return False
-        if random.random() > 0.30:
-            return False
-
-        self.pending_invites[chat_id] = {
-            'votes': {user_id},
-            'started_by': user_id,
-            'created_at': time.time(),
-        }
-        self.chat_last_invite_ts[chat_id] = time.time()
-        self.chat_last_reply_ts[chat_id] = time.time()
-
-        await bot.send_message(
-            chat_id,
-            '👀 Вижу, чат ожил. Го мини-квиз на 5? Напишите «+», «го» или «да» в ближайшие 25 секунд.'
-        )
-        self.invite_tasks[chat_id] = asyncio.create_task(self._invite_timeout(bot, chat_id))
-        return True
+        invited = await self.invite_service.maybe_send_host_invite(bot, chat_id, user_id)
+        if invited:
+            self.chat_last_reply_ts[chat_id] = time.time()
+        return invited
 
     async def _handle_pending_invite_vote(self, bot: Bot, chat_id: int, user_id: int, text: str) -> bool:
-        pending = self.pending_invites.get(chat_id)
-        if not pending:
-            return False
-        if not self._is_join_intent(text):
-            return False
-
-        pending['votes'].add(user_id)
-        votes = len(pending['votes'])
-
-        if votes >= 2:
-            started_by = int(pending['started_by'])
-            self._clear_pending_invite(chat_id)
-            await bot.send_message(chat_id, '🎤 Поймал настрой. Запускаю квиз на 5 вопросов.')
+        async def _start_quiz(started_by: int) -> None:
             await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
-            return True
 
-        return False
-
-    async def _invite_timeout(self, bot: Bot, chat_id: int) -> None:
-        try:
-            await asyncio.sleep(25)
-        except asyncio.CancelledError:
-            return
-
-        pending = self.pending_invites.get(chat_id)
-        if not pending:
-            return
-
-        self._clear_pending_invite(chat_id)
-        await bot.send_message(chat_id, 'Ладно, вижу, чат сегодня делает загадочное лицо. Квиз пока отложим 😏')
+        return await self.invite_service.handle_pending_invite_vote(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            on_threshold_reached=_start_quiz,
+        )
 
     def _wrong_answer_text(self, username: str, question: QuizQuestion) -> str:
         if question.question_type == 'audio':

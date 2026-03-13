@@ -11,11 +11,12 @@ from aiogram import Bot
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.answer_flow_service import AnswerFlowService
 from app.core.chat_config_service import ChatConfigService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
 from app.core.invite_service import InviteService
-from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
+from app.core.models import ChatSettings, GameState, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.core.round_lifecycle_service import RoundLifecycleService
 from app.core.team_mode_service import TeamModeService
@@ -23,7 +24,6 @@ from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
-from app.utils.text import answer_match_details
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class GameManager:
         self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
+        self.answer_flow = AnswerFlowService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.chat_config = ChatConfigService()
@@ -226,62 +227,45 @@ class GameManager:
         if state.current_question_answered:
             return False
 
-        verdict = answer_match_details(text, state.current_question.answer, state.current_question.aliases)
+        verdict = self.answer_flow.match_verdict(text, state.current_question)
 
         if verdict == 'wrong':
             self.adaptive_difficulty.note_wrong(chat_id)
-            if user_id not in state.wrong_reply_user_ids and len(state.wrong_reply_user_ids) < 3:
-                state.wrong_reply_user_ids.add(user_id)
+            if self.answer_flow.register_wrong_attempt(state, user_id):
                 await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
             self.adaptive_difficulty.note_close(chat_id)
-            if user_id not in state.near_miss_user_ids:
-                state.near_miss_user_ids.add(user_id)
+            if self.answer_flow.register_close_attempt(state, user_id):
                 await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
             return False
 
-        state.current_question_answered = True
+        question = state.current_question
         self.adaptive_difficulty.note_correct(chat_id)
-        score = state.scores.setdefault(user_id, PlayerScore(user_id=user_id, username=username))
-        score.username = username
-        score.points += state.current_question.point_value
+        points_awarded, streak_count = self.answer_flow.register_correct_answer(state, user_id, username)
         self.memory_store.note_quiz_event(chat_id, user_id, username, correct=True)
-
-        if state.last_correct_user_id == user_id:
-            state.correct_streak_count += 1
-        else:
-            state.last_correct_user_id = user_id
-            state.correct_streak_count = 1
 
         await self.product_store.note_correct(
             chat_id=chat_id,
             user_id=user_id,
             username=username,
-            points=state.current_question.point_value,
-            streak_count=state.correct_streak_count,
+            points=points_awarded,
+            streak_count=streak_count,
         )
 
         leader_line = self._leader_line(state)
-        streak_line = ''
-        if state.correct_streak_count >= 2:
-            streak_line = f'\n🔥 Серия @{username}: {state.correct_streak_count} подряд!'
-        points_line = f'\n💠 За этот вопрос: +{state.current_question.point_value} SP'
-        if state.current_question.point_value == 1:
-            points_line = '\n💠 За этот вопрос: +1 SP'
 
         self._cancel_question_task(chat_id)
 
         await bot.send_message(
             chat_id,
-            (
-                f'✅ Правильно! @{username} забирает ответ.\n'
-                f'Ответ: {state.current_question.answer}\n'
-                f'Факт: {state.current_question.explanation}'
-                f'{points_line}'
-                f'{streak_line}'
-                f'{leader_line}'
+            self.answer_flow.build_correct_answer_text(
+                username=username,
+                question=question,
+                points_awarded=points_awarded,
+                streak_count=streak_count,
+                leader_line=leader_line,
             ),
         )
         await self._ask_next_question(bot, chat_id)

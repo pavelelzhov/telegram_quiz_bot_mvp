@@ -11,9 +11,9 @@ from typing import Deque, Dict, Optional
 from aiogram import Bot
 from aiogram.types import FSInputFile
 
-from app.agent.agent_reply_provider import AgentReplyProvider
 from app.agent.memory_store import MemoryStore
 from app.config import settings
+from app.core.chat_agent_service import ChatAgentService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
@@ -29,8 +29,8 @@ class GameManager:
     def __init__(self, db: Database, question_provider: LLMQuestionProvider) -> None:
         self.db = db
         self.question_provider = question_provider
-        self.agent_reply_provider = AgentReplyProvider()
         self.memory_store = MemoryStore()
+        self.chat_agent_service = ChatAgentService(self.memory_store)
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.games: Dict[int, GameState] = {}
@@ -336,21 +336,16 @@ class GameManager:
             if random.random() > 0.18:
                 return False
 
-        mode = self._detect_agent_mode(text)
-        user_memory = self.memory_store.get_user_summary(chat_id, user_id, username)
-        chat_memory = self.memory_store.get_chat_summary(chat_id)
-
-        reply = await self.agent_reply_provider.generate_reply(
+        reply = await self.chat_agent_service.generate_reply(
+            chat_id=chat_id,
             chat_title=chat_title,
+            user_id=user_id,
             username=username,
-            user_text=text,
+            text=text,
             history=list(self.chat_histories[chat_id]),
             quiz_active=quiz_active,
             current_question_text=current_question_text,
             addressed=addressed,
-            user_memory=user_memory,
-            chat_memory=chat_memory,
-            mode=mode,
         )
         if not reply:
             return False
@@ -667,22 +662,6 @@ class GameManager:
             'го квиз', 'давай квиз', 'квиз', 'погнали квиз'
         }
         return value in intents
-
-    def _detect_agent_mode(self, text: str) -> str:
-        lowered = text.lower()
-
-        support_tokens = [
-            'мне плохо', 'тревожно', 'паника', 'паническую', 'устал', 'не вывожу',
-            'одиноко', 'грустно', 'тяжело', 'накрывает', 'депресс', 'разбит'
-        ]
-        if any(token in lowered for token in support_tokens):
-            return 'support'
-
-        roast_tokens = ['обосри', 'прожарь', 'роаст', 'разнеси меня', 'поругай меня', 'обругай']
-        if any(token in lowered for token in roast_tokens):
-            return 'roast'
-
-        return 'chat'
 
     async def _maybe_send_host_invite(self, bot: Bot, chat_id: int, user_id: int) -> bool:
         if chat_id in self.pending_invites:

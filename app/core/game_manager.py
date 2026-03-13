@@ -16,6 +16,7 @@ from app.core.chat_config_service import ChatConfigService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
+from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, QuizQuestion
@@ -41,6 +42,7 @@ class GameManager:
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.answer_flow = AnswerFlowService()
         self.chat_participation = ChatParticipationService()
+        self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
@@ -380,48 +382,25 @@ class GameManager:
 
     def get_score_text(self, chat_id: int) -> str:
         state = self.games.get(chat_id)
-        if not state or not state.is_active:
-            return 'Сейчас нет активной игры.'
-
-        if not state.scores:
-            return 'Пока очков нет.'
-
-        ranking = sorted(state.scores.values(), key=lambda item: (-item.points, item.username.lower()))
-        lines = [f'🏆 Текущие очки ({self._mode_label(state.quiz_mode)}):']
-        for idx, player in enumerate(ranking, start=1):
-            lines.append(f'{idx}. @{player.username} — {player.points}')
-        if state.quiz_mode == 'team2v2':
-            lines.extend([''] + self.team_mode.team_score_lines(state))
-        return '\n'.join(lines)
+        team_lines = self.team_mode.team_score_lines(state) if state and state.quiz_mode == 'team2v2' else None
+        return self.game_status.build_score_text(
+            state=state,
+            mode_label=self._mode_label(state.quiz_mode) if state else self._mode_label('classic'),
+            team_score_lines=team_lines,
+        )
 
     def get_status_text(self, chat_id: int) -> str:
         cfg = self.get_chat_settings(chat_id)
         state = self.games.get(chat_id)
-        if not state or not state.is_active:
-            return (
-                'Сейчас нет активной игры.\n'
-                f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
-                f'Тема для следующей игры: {self.get_preferred_category(chat_id)}\n'
-                f'Таймер: {cfg.question_timeout_sec} сек.\n'
-                f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
-                f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n'
-                f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
-                f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
-                f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
-            )
-
-        text = (
-            '📊 Статус игры\n'
-            f'Режим: {self._mode_label(state.quiz_mode)}\n'
-            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
-            f'Вопросов выдано: {state.asked_count}/{state.question_limit}\n'
-            f'Тема: {state.preferred_category}\n'
-            f'Игроков с очками: {len(state.scores)}\n'
-            f'Таймер: {self._timeout_for_mode(state, cfg)} сек.\n'
-            f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
-            f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n'
-            f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
-            f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}'
+        team_lines = self.team_mode.team_score_lines(state) if state and state.quiz_mode == 'team2v2' else None
+        return self.game_status.build_status_text(
+            cfg=cfg,
+            state=state,
+            game_profile_label=self.quiz_engine.game_profile_label(cfg.game_profile),
+            preferred_category=self.get_preferred_category(chat_id),
+            timer_seconds=self._timeout_for_mode(state, cfg) if state else cfg.question_timeout_sec,
+            mode_label=self._mode_label(state.quiz_mode) if state else None,
+            team_score_lines=team_lines,
         )
         if state.quiz_mode == 'team2v2':
             text += '\n\n' + '\n'.join(self.team_mode.team_score_lines(state))

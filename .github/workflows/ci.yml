@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install ruff
+
+      - name: Bytecode check
+        run: |
+          python -m py_compile app/main.py
+          python -m py_compile app/config.py
+          python -m py_compile app/core/models.py
+          python -m py_compile app/core/game_manager.py
+          python -m py_compile app/core/quiz_engine_service.py
+          python -m py_compile app/providers/llm_provider.py
+          python -m py_compile app/providers/web_search_provider.py
+          python -m py_compile app/storage/db.py
+          python -m py_compile app/utils/text.py
+          python -m py_compile app/utils/ops_log.py
+          python -m py_compile app/utils/retry.py
+          python -m py_compile tests/test_quiz_engine_service.py
+          python -m py_compile tests/test_retry.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Lint (ruff)
+        run: ruff check app tests --select F,E9

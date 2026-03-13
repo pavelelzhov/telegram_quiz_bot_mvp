@@ -106,6 +106,12 @@ class GameManager:
     def get_team_lobby_text(self, chat_id: int) -> str:
         return self.team_mode.get_team_lobby_text(chat_id)
 
+    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
+        return self.team_mode.set_team_choice(chat_id, user_id, username, team)
+
+    def get_team_lobby_text(self, chat_id: int) -> str:
+        return self.team_mode.get_team_lobby_text(chat_id)
+
     async def start_game(
         self,
         bot: Bot,

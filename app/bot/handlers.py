@@ -106,17 +106,6 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if text != 'OK':
             await message.answer(text, reply_markup=main_menu_kb())
 
-    async def _send_web_result(message: Message, raw_text: str) -> None:
-        if not message.from_user:
-            return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        result = await web_search.search_and_summarize(
-            chat_title=message.chat.title or 'Чат',
-            username=username,
-            raw_text=raw_text,
-        )
-        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
-
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
         if not rows:
@@ -189,9 +178,16 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('web'))
     async def cmd_web(message: Message) -> None:
-        if not message.text:
+        if not message.from_user or not message.text:
             return
-        await _send_web_result(message, message.text)
+
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        result = await web_search.search_and_summarize(
+            chat_title=message.chat.title or 'Чат',
+            username=username,
+            raw_text=message.text,
+        )
+        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
 
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:

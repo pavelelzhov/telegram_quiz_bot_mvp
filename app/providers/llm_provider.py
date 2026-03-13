@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, Field
 
 from app.config import settings
@@ -387,13 +388,18 @@ class LLMQuestionProvider:
 Верни только валидный JSON.
 """.strip()
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.9,
-            messages=[
-                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
-                {'role': 'user', 'content': user_prompt},
-            ],
+        response = await retry_async(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.9,
+                messages=[
+                    {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user_prompt},
+                ],
+            ),
+            retries=2,
+            base_delay_sec=0.8,
+            should_retry=self._should_retry_llm_error,
         )
 
         content = response.choices[0].message.content or ''
@@ -418,13 +424,18 @@ class LLMQuestionProvider:
 {broken_content}
 """.strip()
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            temperature=0.1,
-            messages=[
-                {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
-                {'role': 'user', 'content': repair_prompt},
-            ],
+        response = await retry_async(
+            lambda: self.client.chat.completions.create(
+                model=self.model,
+                temperature=0.1,
+                messages=[
+                    {'role': 'system', 'content': QUESTION_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': repair_prompt},
+                ],
+            ),
+            retries=2,
+            base_delay_sec=0.8,
+            should_retry=self._should_retry_llm_error,
         )
 
         repaired = response.choices[0].message.content or ''
@@ -677,3 +688,11 @@ class LLMQuestionProvider:
         if extra:
             base += f'|{normalize_text(extra)}'
         return base
+
+    def _should_retry_llm_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (APIConnectionError, APITimeoutError, RateLimitError)):
+            return True
+        if isinstance(exc, APIStatusError):
+            status = getattr(exc, 'status_code', None)
+            return bool(status in {429} or (isinstance(status, int) and status >= 500))
+        return False

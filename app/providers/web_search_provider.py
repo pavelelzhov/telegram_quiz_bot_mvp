@@ -167,8 +167,17 @@ class WebSearchProvider:
         }
 
         async with httpx.AsyncClient(timeout=35.0) as client:
-            response = await client.post(self.search_url, headers=headers, json=payload)
-            response.raise_for_status()
+            async def _call_search() -> httpx.Response:
+                response = await client.post(self.search_url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response
+
+            response = await retry_async(
+                _call_search,
+                retries=2,
+                base_delay_sec=0.7,
+                should_retry=self._should_retry_http_error,
+            )
             data: Any = response.json()
 
         if isinstance(data, list):
@@ -200,6 +209,14 @@ class WebSearchProvider:
 
         sources.sort(key=lambda x: (not x.used, x.title.lower()))
         return answer, sources[:4]
+
+    def _should_retry_http_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            status = exc.response.status_code if exc.response is not None else None
+            return bool(status in {429} or (isinstance(status, int) and status >= 500))
+        return False
 
     async def _polish_answer(self, chat_title: str, username: str, query: str, search_answer: str) -> str:
         prompt = f"""

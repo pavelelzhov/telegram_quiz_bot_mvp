@@ -8,8 +8,6 @@ from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
-
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
@@ -19,6 +17,7 @@ from app.core.feedback_text_service import FeedbackTextService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
+from app.core.round_lifecycle_service import RoundLifecycleService
 from app.core.team_mode_service import TeamModeService
 from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
@@ -41,6 +40,7 @@ class GameManager:
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.chat_config = ChatConfigService()
+        self.round_lifecycle = RoundLifecycleService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
@@ -498,51 +498,8 @@ class GameManager:
         self.recent_question_keys[chat_id].append(question.key)
         state.asked_count += 1
 
-        if question.source == 'llm':
-            source_label = 'ИИ'
-        elif question.source == 'image_pool':
-            source_label = 'картинка'
-        elif question.source == 'music_pool':
-            source_label = 'музыка'
-        else:
-            source_label = 'резерв'
-
-        multiplier_line = ''
-        if question.point_value > 1:
-            multiplier_line = f'\n💠 Цена вопроса: x{question.point_value}'
-
-        header = (
-            f'❓ Вопрос {state.asked_count}/{state.question_limit}\n'
-            f'{question.round_label}\n'
-            f'Категория: {question.category}\n'
-            f'Тема: {question.topic}\n'
-            f'Сложность: {question.difficulty}\n'
-            f'Источник: {source_label}'
-            f'{multiplier_line}\n\n'
-            f'{question.question}'
-        )
-
-        if question.question_type == 'image' and question.photo_url:
-            try:
-                await bot.send_photo(chat_id, photo=question.photo_url, caption=header)
-            except Exception as exc:
-                logger.exception('Failed to send image round: %s', exc)
-                await bot.send_message(chat_id, header + '\n\n(Картинку отправить не удалось, но вопрос остаётся активным.)')
-        elif question.question_type == 'audio' and question.audio_path:
-            try:
-                audio = FSInputFile(question.audio_path)
-                await bot.send_audio(
-                    chat_id,
-                    audio=audio,
-                    caption=header,
-                    title=question.audio_title or 'Музыкальный раунд',
-                    performer=question.audio_performer or 'Quiz Bot',
-                )
-            except Exception as exc:
-                logger.exception('Failed to send audio round: %s', exc)
-                await bot.send_message(chat_id, header + '\n\n(Аудио отправить не удалось, но вопрос остаётся активным.)')
-        else:
-            await bot.send_message(chat_id, header)
+        header = self.round_lifecycle.build_question_header(state, question)
+        await self.round_lifecycle.send_question(bot, chat_id, question, header, logger)
 
         task = asyncio.create_task(self._question_timeout(bot, chat_id, state.asked_count))
         self.question_tasks[chat_id] = task
@@ -567,14 +524,7 @@ class GameManager:
         state.last_correct_user_id = None
         state.correct_streak_count = 0
 
-        await bot.send_message(
-            chat_id,
-            (
-                '⌛ Время вышло.\n'
-                f'Правильный ответ: {state.current_question.answer}\n'
-                f'Факт: {state.current_question.explanation}'
-            ),
-        )
+        await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
         self.adaptive_difficulty.note_timeout(chat_id)
         await self._ask_next_question(bot, chat_id)
 

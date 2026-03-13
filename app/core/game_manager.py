@@ -16,6 +16,7 @@ from app.core.chat_config_service import ChatConfigService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
+from app.core.game_summary_service import GameSummaryService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
@@ -40,6 +41,7 @@ class GameManager:
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.answer_flow = AnswerFlowService()
         self.chat_participation = ChatParticipationService()
+        self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.chat_config = ChatConfigService()
@@ -521,7 +523,7 @@ class GameManager:
 
         state.is_active = False
         self._cancel_question_task(chat_id)
-        ranking = sorted(state.scores.values(), key=lambda item: (-item.points, item.username.lower()))
+        ranking = self.game_summary.build_ranking(state.scores.values())
 
         if ranking:
             winner = ranking[0]
@@ -531,18 +533,17 @@ class GameManager:
             )
             self.memory_store.note_quiz_event(chat_id, winner.user_id, winner.username, won=True)
 
-            summary = ['🏁 Игра завершена!', '', f'Режим: {self._mode_label(state.quiz_mode)}', '', 'Итоговая таблица:']
-            for idx, player in enumerate(ranking, start=1):
-                summary.append(f'{idx}. @{player.username} — {player.points}')
+            team_lines = None
             if state.quiz_mode == 'team2v2':
-                summary.append('')
-                summary.extend(self.team_mode.team_score_lines(state))
-            summary.append('')
-            summary.append(f'👑 Победитель: @{winner.username}')
-            summary.append('💎 Победитель получил +5 сезонных очков')
+                team_lines = self.team_mode.team_score_lines(state)
+            summary = self.game_summary.build_summary_lines(
+                ranking=ranking,
+                mode_label=self._mode_label(state.quiz_mode),
+                team_score_lines=team_lines,
+            )
         else:
             winner = None
-            summary = ['🏁 Игра завершена!', '', 'Никто не набрал очков.']
+            summary = self.game_summary.build_summary_lines(ranking=[], mode_label=self._mode_label(state.quiz_mode))
 
         await bot.send_message(chat_id, '\n'.join(summary))
 

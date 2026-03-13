@@ -20,6 +20,7 @@ from app.core.feedback_text_service import FeedbackTextService
 from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
 from app.core.invite_service import InviteService
+from app.core.invite_orchestration_service import InviteOrchestrationService
 from app.core.models import ChatSettings, GameState, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.core.round_lifecycle_service import RoundLifecycleService
@@ -40,6 +41,7 @@ class GameManager:
         self.chat_agent_service = ChatAgentService(self.memory_store)
         self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
+        self.invite_orchestration = InviteOrchestrationService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.answer_flow = AnswerFlowService()
         self.chat_participation = ChatParticipationService()
@@ -295,7 +297,17 @@ class GameManager:
         self._remember_activity(chat_id, user_id, username, text)
         self.memory_store.note_message(chat_id, user_id, username, text)
 
-        if await self._handle_pending_invite_vote(bot, chat_id, user_id, text):
+        async def _start_quiz(started_by: int) -> None:
+            await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
+
+        if await self.invite_orchestration.handle_pending_invite_vote(
+            invite_service=self.invite_service,
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            on_threshold_reached=_start_quiz,
+        ):
             return True
 
         state = self.games.get(chat_id)
@@ -303,7 +315,13 @@ class GameManager:
         current_question_text = state.current_question.question if quiz_active and state and state.current_question else None
 
         if cfg.host_mode_enabled and not quiz_active:
-            if await self._maybe_send_host_invite(bot, chat_id, user_id):
+            if await self.invite_orchestration.maybe_send_host_invite(
+                invite_service=self.invite_service,
+                bot=bot,
+                chat_id=chat_id,
+                user_id=user_id,
+                on_invited=lambda: self.chat_history.mark_reply(chat_id, time.time()),
+            ):
                 return True
 
         if quiz_active and not addressed:
@@ -569,24 +587,3 @@ class GameManager:
 
     def _recent_message_count(self, chat_id: int, window_sec: int) -> int:
         return self.invite_service.recent_message_count(chat_id, window_sec)
-
-    def _is_join_intent(self, text: str) -> bool:
-        return self.invite_service.is_join_intent(text)
-
-    async def _maybe_send_host_invite(self, bot: Bot, chat_id: int, user_id: int) -> bool:
-        invited = await self.invite_service.maybe_send_host_invite(bot, chat_id, user_id)
-        if invited:
-            self.chat_history.mark_reply(chat_id, time.time())
-        return invited
-
-    async def _handle_pending_invite_vote(self, bot: Bot, chat_id: int, user_id: int, text: str) -> bool:
-        async def _start_quiz(started_by: int) -> None:
-            await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
-
-        return await self.invite_service.handle_pending_invite_vote(
-            bot=bot,
-            chat_id=chat_id,
-            user_id=user_id,
-            text=text,
-            on_threshold_reached=_start_quiz,
-        )

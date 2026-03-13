@@ -175,9 +175,40 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_stats(message: Message) -> None:
         await _send_top(message)
 
+    @router.message(Command('web'))
+    async def cmd_web(message: Message) -> None:
+        if not message.from_user or not message.text:
+            return
+
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        result = await web_search.search_and_summarize(
+            chat_title=message.chat.title or 'Чат',
+            username=username,
+            raw_text=message.text,
+        )
+        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:
         await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+
+    @router.message(Command('health'))
+    async def cmd_health(message: Message) -> None:
+        if not await _is_admin(message):
+            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
+            return
+
+        db_ok = await db.healthcheck()
+        llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
+        web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
+
+        text = (
+            '🩺 Health-check\n'
+            f'Database: {"OK" if db_ok else "FAIL"}\n'
+            f'LLM config: {"OK" if llm_configured else "MISSING"}\n'
+            f'Web search config: {"OK" if web_search_enabled else "DISABLED"}'
+        )
+        await message.answer(text, reply_markup=main_menu_kb())
 
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
@@ -301,7 +332,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not message.from_user or not message.text:
             return
 
-        if message.text.startswith('/') or message.text in BUTTON_TEXTS:
+        if (message.text.startswith('/') and not message.text.startswith('/web')) or message.text in BUTTON_TEXTS:
             return
 
         username = message.from_user.username or message.from_user.full_name.replace(' ', '_')

@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import random
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -16,6 +15,7 @@ from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
 from app.core.chat_config_service import ChatConfigService
 from app.core.chat_agent_service import ChatAgentService
+from app.core.feedback_text_service import FeedbackTextService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
@@ -35,6 +35,7 @@ class GameManager:
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
         self.chat_agent_service = ChatAgentService(self.memory_store)
+        self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.product_store = ProductStore()
@@ -99,12 +100,6 @@ class GameManager:
 
     def get_preferred_category(self, chat_id: int) -> str:
         return self.chat_config.get_preferred_category(chat_id)
-
-    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
-        return self.team_mode.set_team_choice(chat_id, user_id, username, team)
-
-    def get_team_lobby_text(self, chat_id: int) -> str:
-        return self.team_mode.get_team_lobby_text(chat_id)
 
     def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
         return self.team_mode.set_team_choice(chat_id, user_id, username, team)
@@ -237,14 +232,14 @@ class GameManager:
             self.adaptive_difficulty.note_wrong(chat_id)
             if user_id not in state.wrong_reply_user_ids and len(state.wrong_reply_user_ids) < 3:
                 state.wrong_reply_user_ids.add(user_id)
-                await bot.send_message(chat_id, self._wrong_answer_text(username, state.current_question))
+                await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
             self.adaptive_difficulty.note_close(chat_id)
             if user_id not in state.near_miss_user_ids:
                 state.near_miss_user_ids.add(user_id)
-                await bot.send_message(chat_id, self._near_miss_text(username, state.current_question))
+                await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
             return False
 
         state.current_question_answered = True
@@ -686,49 +681,3 @@ class GameManager:
             text=text,
             on_threshold_reached=_start_quiz,
         )
-
-    def _wrong_answer_text(self, username: str, question: QuizQuestion) -> str:
-        if question.question_type == 'audio':
-            variants = [
-                f'🎧 @{username}, версия смелая, но оригинал сейчас нервно перематывается.',
-                f'🎵 @{username}, ты попал не в трек, а в альтернативную вселенную.',
-                f'🎙 @{username}, это был уверенный ответ. Жаль, что не правильный.',
-            ]
-        elif question.question_type == 'image':
-            variants = [
-                f'🖼 @{username}, картинка на тебя посмотрела и тихо не согласилась.',
-                f'👀 @{username}, глаз-алмаз сегодня с небольшим сколом.',
-                f'📸 @{username}, смело. Но фактология попросила тебя выйти на следующей.',
-            ]
-        else:
-            variants = [
-                f'😄 @{username}, версия бодрая, но истина сейчас в другом окне.',
-                f'🫠 @{username}, ответ красивый, уверенный и мимо кассы.',
-                f'😂 @{username}, это было близко примерно как соседний район к другой стране.',
-                f'🤡 @{username}, звучит так, будто ты почти знал... лет пять назад.',
-                f'🧠 @{username}, мозг завёлся, но навигатор повёл не туда.',
-                f'🎯 @{username}, стрела выпущена эффектно, мишень пока жива и улыбается.',
-            ]
-        return random.choice(variants)
-
-    def _near_miss_text(self, username: str, question: QuizQuestion) -> str:
-        if question.question_type == 'audio':
-            variants = [
-                f'🎧 @{username}, уши у тебя рабочие — но трек пока не сдался.',
-                f'🎵 @{username}, почти попал в ноты, но не в ответ.',
-                f'🎙 @{username}, горячо. Музыкальный Шазам в тебе проснулся, но не до конца.',
-            ]
-        elif question.question_type == 'image':
-            variants = [
-                f'🖼 @{username}, почти. Глаза орлиные, но ответ пока мимо ветки.',
-                f'👀 @{username}, очень близко — картинка тебя уважает, но не подтверждает.',
-                f'📸 @{username}, тепло. Фото уже дрогнуло, но правильный ответ ещё нет.',
-            ]
-        else:
-            variants = [
-                f'😏 @{username}, очень близко. Мозг разогрелся, теперь бы ещё доехать до станции «верно».',
-                f'🔥 @{username}, горячо. Ещё полшага — и ты бы забрал этот вопрос как налоговая забирает нервы.',
-                f'🤏 @{username}, почти. Ответ уже машет тебе рукой, но ты пока машешь ему из соседнего окна.',
-                f'🧠 @{username}, мысль правильная по вайбу, но формально мимо. Квиз любит придираться.',
-            ]
-        return random.choice(variants)

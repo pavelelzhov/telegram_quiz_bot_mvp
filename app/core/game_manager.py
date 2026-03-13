@@ -9,16 +9,18 @@ from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
 from aiogram import Bot
-from aiogram.types import FSInputFile
-
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.chat_config_service import ChatConfigService
 from app.core.chat_agent_service import ChatAgentService
+from app.core.feedback_text_service import FeedbackTextService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
-from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
+from app.core.round_lifecycle_service import RoundLifecycleService
+from app.core.team_mode_service import TeamModeService
+from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
@@ -33,20 +35,22 @@ class GameManager:
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
         self.chat_agent_service = ChatAgentService(self.memory_store)
+        self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
+        self.chat_config = ChatConfigService()
+        self.round_lifecycle = RoundLifecycleService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
-        self.preferred_categories: Dict[int, str] = {}
-        self.chat_settings: Dict[int, ChatSettings] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
             lambda: deque(maxlen=settings.recent_questions_limit)
         )
         self.start_locks: Dict[int, asyncio.Lock] = {}
         self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
         self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
+        self.team_mode = TeamModeService()
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.start_locks.get(chat_id)
@@ -59,33 +63,17 @@ class GameManager:
         return self.games.get(chat_id)
 
     def get_chat_settings(self, chat_id: int) -> ChatSettings:
-        if chat_id not in self.chat_settings:
-            self.chat_settings[chat_id] = ChatSettings(question_timeout_sec=settings.question_timeout_sec)
-        return self.chat_settings[chat_id]
+        return self.chat_config.get_chat_settings(chat_id)
 
     def get_settings_text(self, chat_id: int) -> str:
         cfg = self.get_chat_settings(chat_id)
-        return (
-            '⚙️ Настройки чата\n'
-            f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
-            f'Тема по умолчанию: {self.get_preferred_category(chat_id)}\n'
-            f'Таймер на вопрос: {cfg.question_timeout_sec} сек.\n'
-            f'Картинки: {"вкл" if cfg.image_rounds_enabled else "выкл"}\n'
-            f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n'
-            f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
-            f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
-            f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
-        )
+        return self.chat_config.build_settings_text(chat_id, self.quiz_engine.game_profile_label(cfg.game_profile))
 
     def set_game_profile(self, chat_id: int, profile: str) -> bool:
-        if profile not in {'casual', 'standard', 'hardcore'}:
-            return False
-        cfg = self.get_chat_settings(chat_id)
-        cfg.game_profile = profile
-        return True
+        return self.chat_config.set_game_profile(chat_id, profile)
 
     def get_game_profile(self, chat_id: int) -> str:
-        return self.get_chat_settings(chat_id).game_profile
+        return self.chat_config.get_game_profile(chat_id)
 
     async def get_player_product_text(self, chat_id: int, user_id: int, username: str) -> str:
         return await self.product_store.get_player_text(chat_id, user_id, username)
@@ -94,40 +82,31 @@ class GameManager:
         return await self.product_store.get_season_text(chat_id)
 
     def cycle_timeout(self, chat_id: int) -> int:
-        cfg = self.get_chat_settings(chat_id)
-        values = [20, 30, 45]
-        try:
-            idx = values.index(cfg.question_timeout_sec)
-        except ValueError:
-            idx = 1
-        cfg.question_timeout_sec = values[(idx + 1) % len(values)]
-        return cfg.question_timeout_sec
+        return self.chat_config.cycle_timeout(chat_id)
 
     def toggle_image_rounds(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.image_rounds_enabled = not cfg.image_rounds_enabled
-        return cfg.image_rounds_enabled
+        return self.chat_config.toggle_image_rounds(chat_id)
 
     def toggle_music_rounds(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.music_rounds_enabled = not cfg.music_rounds_enabled
-        return cfg.music_rounds_enabled
+        return self.chat_config.toggle_music_rounds(chat_id)
 
     def toggle_admin_only_control(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.admin_only_control = not cfg.admin_only_control
-        return cfg.admin_only_control
+        return self.chat_config.toggle_admin_only_control(chat_id)
 
     def toggle_host_mode(self, chat_id: int) -> bool:
-        cfg = self.get_chat_settings(chat_id)
-        cfg.host_mode_enabled = not cfg.host_mode_enabled
-        return cfg.host_mode_enabled
+        return self.chat_config.toggle_host_mode(chat_id)
 
     def set_preferred_category(self, chat_id: int, category: str) -> None:
-        self.preferred_categories[chat_id] = category
+        self.chat_config.set_preferred_category(chat_id, category)
 
     def get_preferred_category(self, chat_id: int) -> str:
-        return self.preferred_categories.get(chat_id, CATEGORY_RANDOM)
+        return self.chat_config.get_preferred_category(chat_id)
+
+    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
+        return self.team_mode.set_team_choice(chat_id, user_id, username, team)
+
+    def get_team_lobby_text(self, chat_id: int) -> str:
+        return self.team_mode.get_team_lobby_text(chat_id)
 
     async def start_game(
         self,
@@ -155,6 +134,13 @@ class GameManager:
 
             preferred_category = self.get_preferred_category(chat_id)
             cfg = self.get_chat_settings(chat_id)
+            team_assignments: dict[int, str] = {}
+
+            if quiz_mode == 'team2v2':
+                built = self.team_mode.build_team_assignments(chat_id)
+                if built is None:
+                    return f'Для 2v2 нужны команды 2 на 2.\n{self.get_team_lobby_text(chat_id)}'
+                team_assignments = built
 
             state = GameState(
                 chat_id=chat_id,
@@ -162,6 +148,7 @@ class GameManager:
                 question_limit=question_limit,
                 preferred_category=preferred_category,
                 quiz_mode=quiz_mode,
+                team_assignments=team_assignments,
             )
             self.games[chat_id] = state
 
@@ -234,6 +221,9 @@ class GameManager:
         state = self.games.get(chat_id)
         if not state or not state.is_active or not state.current_question:
             return False
+        if state.quiz_mode == 'team2v2' and user_id not in state.team_assignments:
+            await bot.send_message(chat_id, f'@{username}, выбери команду: /team_alpha или /team_beta.')
+            return False
         if state.current_question_answered:
             return False
 
@@ -243,14 +233,14 @@ class GameManager:
             self.adaptive_difficulty.note_wrong(chat_id)
             if user_id not in state.wrong_reply_user_ids and len(state.wrong_reply_user_ids) < 3:
                 state.wrong_reply_user_ids.add(user_id)
-                await bot.send_message(chat_id, self._wrong_answer_text(username, state.current_question))
+                await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
             self.adaptive_difficulty.note_close(chat_id)
             if user_id not in state.near_miss_user_ids:
                 state.near_miss_user_ids.add(user_id)
-                await bot.send_message(chat_id, self._near_miss_text(username, state.current_question))
+                await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
             return False
 
         state.current_question_answered = True
@@ -414,6 +404,8 @@ class GameManager:
         lines = [f'🏆 Текущие очки ({self._mode_label(state.quiz_mode)}):']
         for idx, player in enumerate(ranking, start=1):
             lines.append(f'{idx}. @{player.username} — {player.points}')
+        if state.quiz_mode == 'team2v2':
+            lines.extend([''] + self.team_mode.team_score_lines(state))
         return '\n'.join(lines)
 
     def get_status_text(self, chat_id: int) -> str:
@@ -432,7 +424,7 @@ class GameManager:
                 f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
             )
 
-        return (
+        text = (
             '📊 Статус игры\n'
             f'Режим: {self._mode_label(state.quiz_mode)}\n'
             f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
@@ -445,6 +437,9 @@ class GameManager:
             f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}'
         )
+        if state.quiz_mode == 'team2v2':
+            text += '\n\n' + '\n'.join(self.team_mode.team_score_lines(state))
+        return text
 
     def _leader_line(self, state: GameState) -> str:
         if not state.scores:
@@ -504,51 +499,8 @@ class GameManager:
         self.recent_question_keys[chat_id].append(question.key)
         state.asked_count += 1
 
-        if question.source == 'llm':
-            source_label = 'ИИ'
-        elif question.source == 'image_pool':
-            source_label = 'картинка'
-        elif question.source == 'music_pool':
-            source_label = 'музыка'
-        else:
-            source_label = 'резерв'
-
-        multiplier_line = ''
-        if question.point_value > 1:
-            multiplier_line = f'\n💠 Цена вопроса: x{question.point_value}'
-
-        header = (
-            f'❓ Вопрос {state.asked_count}/{state.question_limit}\n'
-            f'{question.round_label}\n'
-            f'Категория: {question.category}\n'
-            f'Тема: {question.topic}\n'
-            f'Сложность: {question.difficulty}\n'
-            f'Источник: {source_label}'
-            f'{multiplier_line}\n\n'
-            f'{question.question}'
-        )
-
-        if question.question_type == 'image' and question.photo_url:
-            try:
-                await bot.send_photo(chat_id, photo=question.photo_url, caption=header)
-            except Exception as exc:
-                logger.exception('Failed to send image round: %s', exc)
-                await bot.send_message(chat_id, header + '\n\n(Картинку отправить не удалось, но вопрос остаётся активным.)')
-        elif question.question_type == 'audio' and question.audio_path:
-            try:
-                audio = FSInputFile(question.audio_path)
-                await bot.send_audio(
-                    chat_id,
-                    audio=audio,
-                    caption=header,
-                    title=question.audio_title or 'Музыкальный раунд',
-                    performer=question.audio_performer or 'Quiz Bot',
-                )
-            except Exception as exc:
-                logger.exception('Failed to send audio round: %s', exc)
-                await bot.send_message(chat_id, header + '\n\n(Аудио отправить не удалось, но вопрос остаётся активным.)')
-        else:
-            await bot.send_message(chat_id, header)
+        header = self.round_lifecycle.build_question_header(state, question)
+        await self.round_lifecycle.send_question(bot, chat_id, question, header, logger)
 
         task = asyncio.create_task(self._question_timeout(bot, chat_id, state.asked_count))
         self.question_tasks[chat_id] = task
@@ -573,14 +525,7 @@ class GameManager:
         state.last_correct_user_id = None
         state.correct_streak_count = 0
 
-        await bot.send_message(
-            chat_id,
-            (
-                '⌛ Время вышло.\n'
-                f'Правильный ответ: {state.current_question.answer}\n'
-                f'Факт: {state.current_question.explanation}'
-            ),
-        )
+        await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
         self.adaptive_difficulty.note_timeout(chat_id)
         await self._ask_next_question(bot, chat_id)
 
@@ -605,6 +550,9 @@ class GameManager:
             summary = ['🏁 Игра завершена!', '', f'Режим: {self._mode_label(state.quiz_mode)}', '', 'Итоговая таблица:']
             for idx, player in enumerate(ranking, start=1):
                 summary.append(f'{idx}. @{player.username} — {player.points}')
+            if state.quiz_mode == 'team2v2':
+                summary.append('')
+                summary.extend(self.team_mode.team_score_lines(state))
             summary.append('')
             summary.append(f'👑 Победитель: @{winner.username}')
             summary.append('💎 Победитель получил +5 сезонных очков')
@@ -618,6 +566,7 @@ class GameManager:
             await self.db.save_game_result(
                 chat_id=chat_id,
                 finished_at=datetime.now(timezone.utc).isoformat(),
+                quiz_mode=state.quiz_mode,
                 winner_user_id=winner.user_id if winner else None,
                 winner_username=winner.username if winner else None,
                 winner_points=winner.points if winner else 0,
@@ -683,49 +632,3 @@ class GameManager:
             text=text,
             on_threshold_reached=_start_quiz,
         )
-
-    def _wrong_answer_text(self, username: str, question: QuizQuestion) -> str:
-        if question.question_type == 'audio':
-            variants = [
-                f'🎧 @{username}, версия смелая, но оригинал сейчас нервно перематывается.',
-                f'🎵 @{username}, ты попал не в трек, а в альтернативную вселенную.',
-                f'🎙 @{username}, это был уверенный ответ. Жаль, что не правильный.',
-            ]
-        elif question.question_type == 'image':
-            variants = [
-                f'🖼 @{username}, картинка на тебя посмотрела и тихо не согласилась.',
-                f'👀 @{username}, глаз-алмаз сегодня с небольшим сколом.',
-                f'📸 @{username}, смело. Но фактология попросила тебя выйти на следующей.',
-            ]
-        else:
-            variants = [
-                f'😄 @{username}, версия бодрая, но истина сейчас в другом окне.',
-                f'🫠 @{username}, ответ красивый, уверенный и мимо кассы.',
-                f'😂 @{username}, это было близко примерно как соседний район к другой стране.',
-                f'🤡 @{username}, звучит так, будто ты почти знал... лет пять назад.',
-                f'🧠 @{username}, мозг завёлся, но навигатор повёл не туда.',
-                f'🎯 @{username}, стрела выпущена эффектно, мишень пока жива и улыбается.',
-            ]
-        return random.choice(variants)
-
-    def _near_miss_text(self, username: str, question: QuizQuestion) -> str:
-        if question.question_type == 'audio':
-            variants = [
-                f'🎧 @{username}, уши у тебя рабочие — но трек пока не сдался.',
-                f'🎵 @{username}, почти попал в ноты, но не в ответ.',
-                f'🎙 @{username}, горячо. Музыкальный Шазам в тебе проснулся, но не до конца.',
-            ]
-        elif question.question_type == 'image':
-            variants = [
-                f'🖼 @{username}, почти. Глаза орлиные, но ответ пока мимо ветки.',
-                f'👀 @{username}, очень близко — картинка тебя уважает, но не подтверждает.',
-                f'📸 @{username}, тепло. Фото уже дрогнуло, но правильный ответ ещё нет.',
-            ]
-        else:
-            variants = [
-                f'😏 @{username}, очень близко. Мозг разогрелся, теперь бы ещё доехать до станции «верно».',
-                f'🔥 @{username}, горячо. Ещё полшага — и ты бы забрал этот вопрос как налоговая забирает нервы.',
-                f'🤏 @{username}, почти. Ответ уже машет тебе рукой, но ты пока машешь ему из соседнего окна.',
-                f'🧠 @{username}, мысль правильная по вайбу, но формально мимо. Квиз любит придираться.',
-            ]
-        return random.choice(variants)

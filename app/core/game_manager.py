@@ -138,7 +138,7 @@ class GameManager:
                 )
                 return 'Игра уже идет в этом чате. Сначала закончи текущую — этот квиз не любит бигамию 😏'
 
-            self._clear_pending_invite(chat_id)
+            self.invite_service.clear_pending_invite(chat_id)
 
             preferred_category = self.get_preferred_category(chat_id)
             cfg = self.get_chat_settings(chat_id)
@@ -294,7 +294,7 @@ class GameManager:
             return False
 
         self.chat_history.remember_message(chat_id, 'user', username, text)
-        self._remember_activity(chat_id, user_id, username, text)
+        self.invite_service.remember_activity(chat_id, user_id, username, text)
         self.memory_store.note_message(chat_id, user_id, username, text)
 
         async def _start_quiz(started_by: int) -> None:
@@ -340,8 +340,8 @@ class GameManager:
 
         if not addressed:
             if not self.chat_participation.passes_passive_reply_filters(
-                recent_unique_users=self._recent_unique_user_count(chat_id, 180),
-                recent_messages=self._recent_message_count(chat_id, 180),
+                recent_unique_users=self.invite_service.recent_unique_user_count(chat_id, 180),
+                recent_messages=self.invite_service.recent_message_count(chat_id, 180),
                 text=text,
                 random_value=random.random(),
             ):
@@ -572,18 +572,3 @@ class GameManager:
         task = self.question_tasks.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
-
-    def _cancel_invite_task(self, chat_id: int) -> None:
-        self.invite_service.cancel_invite_task(chat_id)
-
-    def _clear_pending_invite(self, chat_id: int) -> None:
-        self.invite_service.clear_pending_invite(chat_id)
-
-    def _remember_activity(self, chat_id: int, user_id: int, username: str, text: str) -> None:
-        self.invite_service.remember_activity(chat_id, user_id, username, text)
-
-    def _recent_unique_user_count(self, chat_id: int, window_sec: int) -> int:
-        return self.invite_service.recent_unique_user_count(chat_id, window_sec)
-
-    def _recent_message_count(self, chat_id: int, window_sec: int) -> int:
-        return self.invite_service.recent_message_count(chat_id, window_sec)

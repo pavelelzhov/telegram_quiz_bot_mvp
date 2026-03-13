@@ -102,6 +102,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if text != 'OK':
             await message.answer(text, reply_markup=main_menu_kb())
 
+    async def _reply_if_error(message: Message, text: str) -> None:
+        if text != 'OK':
+            await message.answer(text, reply_markup=main_menu_kb())
+
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
         if not rows:
@@ -148,8 +152,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_control_allowed(message):
             return
         text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена командой.')
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('quiz_status'))
     async def cmd_quiz_status(message: Message) -> None:
@@ -158,14 +161,12 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('hint'))
     async def cmd_hint(message: Message) -> None:
         text = await game_manager.give_hint(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('skip'))
     async def cmd_skip(message: Message) -> None:
         text = await game_manager.skip_question(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(Command('score'))
     async def cmd_score(message: Message) -> None:
@@ -298,14 +299,12 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:
         text = await game_manager.give_hint(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text == '⏭ Пропустить')
     async def btn_skip(message: Message) -> None:
         text = await game_manager.skip_question(message.bot, message.chat.id)
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text == '🏆 Очки')
     async def btn_score(message: Message) -> None:
@@ -324,8 +323,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_control_allowed(message):
             return
         text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена кнопкой.')
-        if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+        await _reply_if_error(message, text)
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:

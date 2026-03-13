@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import random
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone

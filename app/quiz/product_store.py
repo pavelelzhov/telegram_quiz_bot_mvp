@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
@@ -284,9 +284,9 @@ class ProductStore:
             value = json.loads(raw)
             if isinstance(value, list):
                 return value
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return []
 
     def _now(self) -> str:
-        return datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')

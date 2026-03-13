@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
@@ -67,6 +67,7 @@ class ProductStore:
             self._grant_achievement(achievements, 'correct_100', '100 точных ответов')
 
         self._grant_title(titles, player)
+        self._grant_mission_rewards(achievements, player)
 
         player['achievements_json'] = json.dumps(achievements, ensure_ascii=False)
         player['titles_json'] = json.dumps(titles, ensure_ascii=False)
@@ -104,6 +105,7 @@ class ProductStore:
                     self._grant_achievement(achievements, 'wins_25', '25 побед')
 
             self._grant_title(titles, player)
+            self._grant_mission_rewards(achievements, player)
 
             player['achievements_json'] = json.dumps(achievements, ensure_ascii=False)
             player['titles_json'] = json.dumps(titles, ensure_ascii=False)
@@ -126,6 +128,7 @@ class ProductStore:
             mission_lines.append(
                 f'{mark} {mission["title"]}: {mission["progress"]}/{mission["target"]}'
             )
+        mission_lines.append('🎁 Награды за миссии: только ачивки и титулы (без SP).')
 
         return (
             '🙋 Профиль игрока\n'
@@ -258,14 +261,32 @@ class ProductStore:
             return
         achievements.append({'code': code, 'label': label})
 
+    def _grant_mission_rewards(self, achievements: list[dict[str, str]], player: dict[str, Any]) -> None:
+        missions = self._build_missions(player)
+        rewards = {
+            'Сыграть 5 матчей': ('mission_games_5', '🎁 Миссия: сыграть 5 матчей'),
+            'Выиграть 3 матча': ('mission_wins_3', '🎁 Миссия: выиграть 3 матча'),
+            'Дать 25 точных ответов': ('mission_correct_25', '🎁 Миссия: 25 точных ответов'),
+            'Взять серию x3': ('mission_streak_3', '🎁 Миссия: серия x3'),
+            'Взять серию x5': ('mission_streak_5', '🎁 Миссия: серия x5'),
+        }
+        for mission in missions:
+            if not mission['done']:
+                continue
+            reward = rewards.get(mission['title'])
+            if not reward:
+                continue
+            code, label = reward
+            self._grant_achievement(achievements, code, label)
+
     def _loads_list(self, raw: str) -> list[Any]:
         try:
             value = json.loads(raw)
             if isinstance(value, list):
                 return value
-        except Exception:
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return []
 
     def _now(self) -> str:
-        return datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')

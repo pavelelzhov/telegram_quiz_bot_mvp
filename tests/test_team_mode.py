@@ -18,6 +18,14 @@ class _DummyProvider:
     pass
 
 
+class _DummyBot:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send_message(self, _chat_id: int, text: str) -> None:
+        self.messages.append(text)
+
+
 class TeamModeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manager = GameManager(db=_DummyDb(), question_provider=_DummyProvider())
@@ -49,6 +57,32 @@ class TeamModeTests(unittest.TestCase):
         self.assertIn('🟥 Альфа — 5', text)
         self.assertIn('🟦 Бета — 5', text)
         self.assertIn('Вклад игроков', text)
+
+
+class TeamModeFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.manager = GameManager(db=_DummyDb(), question_provider=_DummyProvider())
+
+    async def test_team_start_requires_2v2_lobby(self) -> None:
+        bot = _DummyBot()
+
+        msg = await self.manager.start_game(
+            bot=bot,
+            chat_id=1,
+            started_by_user_id=10,
+            question_limit=10,
+            quiz_mode='team2v2',
+        )
+
+        self.assertIn('Для 2v2 нужны команды 2 на 2', msg)
+
+    async def test_team_switch_returns_lobby_status(self) -> None:
+        self.manager.set_team_choice(1, 10, 'alice', 'alpha')
+        text = self.manager.set_team_choice(1, 10, 'alice', 'beta')
+
+        self.assertIn('🤝 Лобби 2v2', text)
+        self.assertIn('🟥 Альфа: 0/2', text)
+        self.assertIn('🟦 Бета: 1/2', text)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import time
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -11,6 +12,10 @@ from app.config import settings
 from app.core.game_manager import GameManager
 from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
+from app.utils.ops_log import log_operation
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_router(game_manager: GameManager, db: Database) -> Router:
@@ -330,6 +335,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('health'))
     async def cmd_health(message: Message) -> None:
+        started = time.perf_counter()
         if not await _is_admin(message):
             await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
             return
@@ -346,11 +352,37 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
         web_ms = (time.perf_counter() - web_started) * 1000
 
+        db_status = 'OK' if db_ok else 'FAIL'
+        llm_status = 'OK' if llm_configured else 'DEGRADED'
+        web_status = 'OK' if web_search_enabled else 'DEGRADED'
+        overall = 'OK'
+        if not db_ok:
+            overall = 'FAIL'
+        elif not llm_configured or not web_search_enabled:
+            overall = 'DEGRADED'
+
+        log_operation(
+            logger,
+            operation='health_check',
+            chat_id=message.chat.id,
+            result=overall.lower(),
+            duration_ms=(time.perf_counter() - started) * 1000,
+            extra={
+                'db_status': db_status,
+                'db_latency_ms': f'{db_ms:.1f}',
+                'llm_status': llm_status,
+                'llm_latency_ms': f'{llm_ms:.1f}',
+                'web_status': web_status,
+                'web_latency_ms': f'{web_ms:.1f}',
+            },
+        )
+
         text = (
             '🩺 Health-check\n'
-            f'Database: {"OK" if db_ok else "FAIL"} ({db_ms:.1f} ms)\n'
-            f'LLM config: {"OK" if llm_configured else "MISSING"} ({llm_ms:.1f} ms)\n'
-            f'Web search config: {"OK" if web_search_enabled else "DISABLED"} ({web_ms:.1f} ms)'
+            f'Overall: {overall}\n'
+            f'Database: {db_status} ({db_ms:.1f} ms)\n'
+            f'LLM config: {llm_status} ({llm_ms:.1f} ms)\n'
+            f'Web search config: {web_status} ({web_ms:.1f} ms)'
         )
         await message.answer(text, reply_markup=main_menu_kb())
 

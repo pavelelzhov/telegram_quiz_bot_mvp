@@ -118,6 +118,14 @@ class ProductStore:
 
         title = titles[-1] if titles else 'Новичок'
         achv = ', '.join([item['label'] for item in achievements[-4:]]) if achievements else 'пока нет'
+        missions = self._build_missions(player)
+
+        mission_lines = ['🎯 Миссии:']
+        for mission in missions:
+            mark = '✅' if mission['done'] else '⬜'
+            mission_lines.append(
+                f'{mark} {mission["title"]}: {mission["progress"]}/{mission["target"]}'
+            )
 
         return (
             '🙋 Профиль игрока\n'
@@ -128,8 +136,29 @@ class ProductStore:
             f'Побед: {player["total_wins"]}\n'
             f'Точных ответов: {player["total_correct"]}\n'
             f'Лучшая серия: {player["best_streak"]}\n'
-            f'Ачивки: {achv}'
+            f'Ачивки: {achv}\n\n'
+            + '\n'.join(mission_lines)
         )
+
+    def _build_missions(self, player: dict[str, Any]) -> list[dict[str, Any]]:
+        total_games = int(player.get('total_games', 0))
+        total_wins = int(player.get('total_wins', 0))
+        total_correct = int(player.get('total_correct', 0))
+        best_streak = int(player.get('best_streak', 0))
+
+        missions = [
+            {'title': 'Сыграть 5 матчей', 'progress': total_games, 'target': 5},
+            {'title': 'Выиграть 3 матча', 'progress': total_wins, 'target': 3},
+            {'title': 'Дать 25 точных ответов', 'progress': total_correct, 'target': 25},
+            {'title': 'Взять серию x3', 'progress': best_streak, 'target': 3},
+            {'title': 'Взять серию x5', 'progress': best_streak, 'target': 5},
+        ]
+
+        for mission in missions:
+            mission['progress'] = min(int(mission['progress']), int(mission['target']))
+            mission['done'] = mission['progress'] >= int(mission['target'])
+
+        return missions
 
     async def get_season_text(self, chat_id: int, limit: int = 10) -> str:
         await self.ensure_initialized()
@@ -240,4 +269,3 @@ class ProductStore:
 
     def _now(self) -> str:
         return datetime.utcnow().isoformat(timespec='seconds') + 'Z'
-

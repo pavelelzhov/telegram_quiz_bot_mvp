@@ -8,3 +8,7 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/*.json.bak
+data/agent_memory.json
+data/quiz_history.json
+data/music_rounds.json
+app/**/*.bak_*

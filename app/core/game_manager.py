@@ -14,6 +14,7 @@ from aiogram.types import FSInputFile
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.chat_agent_service import ChatAgentService
+from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
@@ -31,6 +32,7 @@ class GameManager:
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
         self.chat_agent_service = ChatAgentService(self.memory_store)
+        self.invite_service = InviteService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.games: Dict[int, GameState] = {}
@@ -43,10 +45,6 @@ class GameManager:
         self.start_locks: Dict[int, asyncio.Lock] = {}
         self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
         self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
-        self.chat_last_invite_ts: Dict[int, float] = defaultdict(lambda: 0.0)
-        self.chat_activity: Dict[int, Deque[dict[str, object]]] = defaultdict(lambda: deque(maxlen=60))
-        self.pending_invites: Dict[int, dict] = {}
-        self.invite_tasks: Dict[int, asyncio.Task] = {}
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.start_locks.get(chat_id)
@@ -623,13 +621,10 @@ class GameManager:
             task.cancel()
 
     def _cancel_invite_task(self, chat_id: int) -> None:
-        task = self.invite_tasks.pop(chat_id, None)
-        if task and not task.done():
-            task.cancel()
+        self.invite_service.cancel_invite_task(chat_id)
 
     def _clear_pending_invite(self, chat_id: int) -> None:
-        self.pending_invites.pop(chat_id, None)
-        self._cancel_invite_task(chat_id)
+        self.invite_service.clear_pending_invite(chat_id)
 
     def _remember_chat_message(self, chat_id: int, role: str, speaker: str, text: str) -> None:
         value = text.strip()
@@ -638,89 +633,34 @@ class GameManager:
         self.chat_histories[chat_id].append({'role': role, 'speaker': speaker, 'text': value[:500]})
 
     def _remember_activity(self, chat_id: int, user_id: int, username: str, text: str) -> None:
-        self.chat_activity[chat_id].append(
-            {'ts': time.time(), 'user_id': user_id, 'username': username, 'text': text[:300]}
-        )
+        self.invite_service.remember_activity(chat_id, user_id, username, text)
 
     def _recent_unique_user_count(self, chat_id: int, window_sec: int) -> int:
-        cutoff = time.time() - window_sec
-        users = {
-            int(item['user_id'])
-            for item in self.chat_activity[chat_id]
-            if float(item['ts']) >= cutoff
-        }
-        return len(users)
+        return self.invite_service.recent_unique_user_count(chat_id, window_sec)
 
     def _recent_message_count(self, chat_id: int, window_sec: int) -> int:
-        cutoff = time.time() - window_sec
-        return sum(1 for item in self.chat_activity[chat_id] if float(item['ts']) >= cutoff)
+        return self.invite_service.recent_message_count(chat_id, window_sec)
 
     def _is_join_intent(self, text: str) -> bool:
-        value = text.strip().lower()
-        intents = {
-            '+', '++', 'го', 'да', 'ага', 'погнали', 'запускай', 'старт',
-            'го квиз', 'давай квиз', 'квиз', 'погнали квиз'
-        }
-        return value in intents
+        return self.invite_service.is_join_intent(text)
 
     async def _maybe_send_host_invite(self, bot: Bot, chat_id: int, user_id: int) -> bool:
-        if chat_id in self.pending_invites:
-            return False
-        if time.time() - self.chat_last_invite_ts[chat_id] < 600:
-            return False
-        if self._recent_unique_user_count(chat_id, 180) < 2:
-            return False
-        if self._recent_message_count(chat_id, 180) < 6:
-            return False
-        if random.random() > 0.30:
-            return False
-
-        self.pending_invites[chat_id] = {
-            'votes': {user_id},
-            'started_by': user_id,
-            'created_at': time.time(),
-        }
-        self.chat_last_invite_ts[chat_id] = time.time()
-        self.chat_last_reply_ts[chat_id] = time.time()
-
-        await bot.send_message(
-            chat_id,
-            '👀 Вижу, чат ожил. Го мини-квиз на 5? Напишите «+», «го» или «да» в ближайшие 25 секунд.'
-        )
-        self.invite_tasks[chat_id] = asyncio.create_task(self._invite_timeout(bot, chat_id))
-        return True
+        invited = await self.invite_service.maybe_send_host_invite(bot, chat_id, user_id)
+        if invited:
+            self.chat_last_reply_ts[chat_id] = time.time()
+        return invited
 
     async def _handle_pending_invite_vote(self, bot: Bot, chat_id: int, user_id: int, text: str) -> bool:
-        pending = self.pending_invites.get(chat_id)
-        if not pending:
-            return False
-        if not self._is_join_intent(text):
-            return False
-
-        pending['votes'].add(user_id)
-        votes = len(pending['votes'])
-
-        if votes >= 2:
-            started_by = int(pending['started_by'])
-            self._clear_pending_invite(chat_id)
-            await bot.send_message(chat_id, '🎤 Поймал настрой. Запускаю квиз на 5 вопросов.')
+        async def _start_quiz(started_by: int) -> None:
             await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
-            return True
 
-        return False
-
-    async def _invite_timeout(self, bot: Bot, chat_id: int) -> None:
-        try:
-            await asyncio.sleep(25)
-        except asyncio.CancelledError:
-            return
-
-        pending = self.pending_invites.get(chat_id)
-        if not pending:
-            return
-
-        self._clear_pending_invite(chat_id)
-        await bot.send_message(chat_id, 'Ладно, вижу, чат сегодня делает загадочное лицо. Квиз пока отложим 😏')
+        return await self.invite_service.handle_pending_invite_vote(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            on_threshold_reached=_start_quiz,
+        )
 
     def _wrong_answer_text(self, username: str, question: QuizQuestion) -> str:
         if question.question_type == 'audio':

@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 
+logger = logging.getLogger(__name__)
+
+
 def build_router(game_manager: GameManager, db: Database) -> Router:
     router = Router()
     bot_username_cache: dict[str, str | None] = {'value': None}
@@ -159,6 +162,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if text != 'OK':
             await message.answer(text, reply_markup=main_menu_kb())
 
+    def _sender_username(message: Message) -> str | None:
+        if not message.from_user:
+            return None
+        return message.from_user.username or message.from_user.full_name.replace(' ', '_')
+
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
         await message.answer(leaderboard_service.format_chat_top(rows), reply_markup=main_menu_kb())
@@ -172,9 +180,9 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         await message.answer(leaderboard_service.format_weekly_top(rows), reply_markup=main_menu_kb())
 
     async def _send_profile(message: Message) -> None:
-        if not message.from_user:
+        username = _sender_username(message)
+        if not message.from_user or not username:
             return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
         text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
         await message.answer(text, reply_markup=main_menu_kb())
 
@@ -184,16 +192,16 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         await message.answer(text, reply_markup=main_menu_kb())
 
     async def _set_team_and_reply(message: Message, team: str) -> None:
-        if not message.from_user:
+        username = _sender_username(message)
+        if not message.from_user or not username:
             return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
         text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, team)
         await message.answer(text, reply_markup=main_menu_kb())
 
     async def _send_web_search(message: Message, raw_text: str) -> None:
-        if not message.from_user:
+        username = _sender_username(message)
+        if not username:
             return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
         result = await web_search.search_and_summarize(
             chat_title=message.chat.title or 'Чат',
             username=username,
@@ -514,7 +522,9 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if (message.text.startswith('/') and not message.text.startswith('/web')) or message.text in BUTTON_TEXTS:
             return
 
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        username = _sender_username(message)
+        if not username:
+            return
         addressed = await _is_addressed_to_bot(message)
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):

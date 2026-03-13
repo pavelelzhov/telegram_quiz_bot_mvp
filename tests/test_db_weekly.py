@@ -19,6 +19,7 @@ class WeeklyStatsDbTests(unittest.IsolatedAsyncioTestCase):
         await self.db.save_game_result(
             chat_id=1,
             finished_at='2026-03-17T12:00:00+00:00',
+            quiz_mode='classic',
             winner_user_id=10,
             winner_username='alice',
             winner_points=5,
@@ -28,6 +29,7 @@ class WeeklyStatsDbTests(unittest.IsolatedAsyncioTestCase):
         await self.db.save_game_result(
             chat_id=1,
             finished_at='2026-03-25T12:00:00+00:00',
+            quiz_mode='classic',
             winner_user_id=11,
             winner_username='bob',
             winner_points=7,
@@ -47,6 +49,7 @@ class WeeklyStatsDbTests(unittest.IsolatedAsyncioTestCase):
         await self.db.save_game_result(
             chat_id=1,
             finished_at='2026-03-17T12:00:00+00:00',
+            quiz_mode='classic',
             winner_user_id=10,
             winner_username='alice',
             winner_points=5,
@@ -56,6 +59,7 @@ class WeeklyStatsDbTests(unittest.IsolatedAsyncioTestCase):
         await self.db.save_game_result(
             chat_id=1,
             finished_at='2026-03-24T12:00:00+00:00',
+            quiz_mode='classic',
             winner_user_id=10,
             winner_username='alice',
             winner_points=4,

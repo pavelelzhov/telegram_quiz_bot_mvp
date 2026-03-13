@@ -77,6 +77,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             '— профиль игрока\n'
             '— сезонный рейтинг\n\n'
             '/season — сезонный топ\n'
+            '/weekly — недельный топ\n'
             '/me — твой профиль'
         )
 
@@ -120,6 +121,17 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def _send_season(message: Message) -> None:
         text = await game_manager.get_season_product_text(message.chat.id)
         await message.answer(text, reply_markup=main_menu_kb())
+
+    async def _send_weekly(message: Message) -> None:
+        rows = await db.get_weekly_top_players(message.chat.id, limit=10)
+        if not rows:
+            await message.answer('За эту неделю пока нет результатов.', reply_markup=main_menu_kb())
+            return
+
+        lines = ['🗓 Недельный топ игроков:']
+        for idx, (username, total_points, wins, games_played) in enumerate(rows, start=1):
+            lines.append(f'{idx}. @{username} — очки: {total_points}, победы: {wins}, игр: {games_played}')
+        await message.answer('\n'.join(lines), reply_markup=main_menu_kb())
 
     async def _send_profile(message: Message) -> None:
         if not message.from_user:
@@ -175,6 +187,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('season'))
     async def cmd_season(message: Message) -> None:
         await _send_season(message)
+
+    @router.message(Command('weekly'))
+    async def cmd_weekly(message: Message) -> None:
+        await _send_weekly(message)
 
     @router.message(Command('me'))
     async def cmd_me(message: Message) -> None:

@@ -47,6 +47,9 @@ class GameManager:
         self.start_locks: Dict[int, asyncio.Lock] = {}
         self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
         self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
+        self.team_lobbies: Dict[int, dict[str, dict[int, str]]] = defaultdict(
+            lambda: {'alpha': {}, 'beta': {}}
+        )
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.start_locks.get(chat_id)
@@ -129,6 +132,78 @@ class GameManager:
     def get_preferred_category(self, chat_id: int) -> str:
         return self.preferred_categories.get(chat_id, CATEGORY_RANDOM)
 
+    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
+        team_name = team.strip().lower()
+        if team_name not in {'alpha', 'beta'}:
+            return 'Неверная команда. Используй: /team_alpha или /team_beta.'
+
+        lobby = self.team_lobbies[chat_id]
+        current_team = self._team_of_user_in_lobby(chat_id, user_id)
+        if current_team == team_name:
+            return f'Ты уже в команде {self._team_label(team_name)}.'
+
+        if current_team:
+            lobby[current_team].pop(user_id, None)
+
+        if len(lobby[team_name]) >= 2:
+            return f'Команда {self._team_label(team_name)} уже заполнена (2/2).'
+
+        lobby[team_name][user_id] = username
+        return f'@{username}, ты в команде {self._team_label(team_name)}.\n{self.get_team_lobby_text(chat_id)}'
+
+    def get_team_lobby_text(self, chat_id: int) -> str:
+        lobby = self.team_lobbies[chat_id]
+        alpha = ', '.join(f'@{name}' for name in lobby['alpha'].values()) or '—'
+        beta = ', '.join(f'@{name}' for name in lobby['beta'].values()) or '—'
+        return (
+            '🤝 Лобби 2v2\n'
+            f'{self._team_label("alpha")}: {len(lobby["alpha"])}/2 — {alpha}\n'
+            f'{self._team_label("beta")}: {len(lobby["beta"])}/2 — {beta}\n'
+            'Выбор: /team_alpha или /team_beta\n'
+            'Старт: /team_start'
+        )
+
+    def _team_of_user_in_lobby(self, chat_id: int, user_id: int) -> str | None:
+        lobby = self.team_lobbies[chat_id]
+        for team_name in ('alpha', 'beta'):
+            if user_id in lobby[team_name]:
+                return team_name
+        return None
+
+    def _team_label(self, team_name: str) -> str:
+        if team_name == 'alpha':
+            return '🟥 Альфа'
+        return '🟦 Бета'
+
+    def _team_score_lines(self, state: GameState) -> list[str]:
+        totals = {'alpha': 0, 'beta': 0}
+        for user_id, score in state.scores.items():
+            team = state.team_assignments.get(user_id)
+            if team in totals:
+                totals[team] += score.points
+
+        lines = ['🤝 Командный счёт:']
+        for team_name in ('alpha', 'beta'):
+            lines.append(f'{self._team_label(team_name)} — {totals[team_name]}')
+
+        lines.append('')
+        lines.append('Вклад игроков:')
+        for team_name in ('alpha', 'beta'):
+            lines.append(f'{self._team_label(team_name)}:')
+            members = [
+                player
+                for player in state.scores.values()
+                if state.team_assignments.get(player.user_id) == team_name
+            ]
+            members.sort(key=lambda item: (-item.points, item.username.lower()))
+            if not members:
+                lines.append('• пока без очков')
+                continue
+            for player in members:
+                lines.append(f'• @{player.username} — {player.points}')
+
+        return lines
+
     async def start_game(
         self,
         bot: Bot,
@@ -155,6 +230,17 @@ class GameManager:
 
             preferred_category = self.get_preferred_category(chat_id)
             cfg = self.get_chat_settings(chat_id)
+            team_assignments: dict[int, str] = {}
+
+            if quiz_mode == 'team2v2':
+                lobby = self.team_lobbies[chat_id]
+                if len(lobby['alpha']) != 2 or len(lobby['beta']) != 2:
+                    return f'Для 2v2 нужны команды 2 на 2.\n{self.get_team_lobby_text(chat_id)}'
+
+                for user_id in lobby['alpha']:
+                    team_assignments[user_id] = 'alpha'
+                for user_id in lobby['beta']:
+                    team_assignments[user_id] = 'beta'
 
             state = GameState(
                 chat_id=chat_id,
@@ -162,6 +248,7 @@ class GameManager:
                 question_limit=question_limit,
                 preferred_category=preferred_category,
                 quiz_mode=quiz_mode,
+                team_assignments=team_assignments,
             )
             self.games[chat_id] = state
 
@@ -233,6 +320,9 @@ class GameManager:
     async def handle_answer(self, bot: Bot, chat_id: int, user_id: int, username: str, text: str) -> bool:
         state = self.games.get(chat_id)
         if not state or not state.is_active or not state.current_question:
+            return False
+        if state.quiz_mode == 'team2v2' and user_id not in state.team_assignments:
+            await bot.send_message(chat_id, f'@{username}, выбери команду: /team_alpha или /team_beta.')
             return False
         if state.current_question_answered:
             return False
@@ -414,6 +504,8 @@ class GameManager:
         lines = [f'🏆 Текущие очки ({self._mode_label(state.quiz_mode)}):']
         for idx, player in enumerate(ranking, start=1):
             lines.append(f'{idx}. @{player.username} — {player.points}')
+        if state.quiz_mode == 'team2v2':
+            lines.extend([''] + self._team_score_lines(state))
         return '\n'.join(lines)
 
     def get_status_text(self, chat_id: int) -> str:
@@ -432,7 +524,7 @@ class GameManager:
                 f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
             )
 
-        return (
+        text = (
             '📊 Статус игры\n'
             f'Режим: {self._mode_label(state.quiz_mode)}\n'
             f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
@@ -445,6 +537,9 @@ class GameManager:
             f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}'
         )
+        if state.quiz_mode == 'team2v2':
+            text += '\n\n' + '\n'.join(self._team_score_lines(state))
+        return text
 
     def _leader_line(self, state: GameState) -> str:
         if not state.scores:
@@ -605,6 +700,9 @@ class GameManager:
             summary = ['🏁 Игра завершена!', '', f'Режим: {self._mode_label(state.quiz_mode)}', '', 'Итоговая таблица:']
             for idx, player in enumerate(ranking, start=1):
                 summary.append(f'{idx}. @{player.username} — {player.points}')
+            if state.quiz_mode == 'team2v2':
+                summary.append('')
+                summary.extend(self._team_score_lines(state))
             summary.append('')
             summary.append(f'👑 Победитель: @{winner.username}')
             summary.append('💎 Победитель получил +5 сезонных очков')
@@ -618,6 +716,7 @@ class GameManager:
             await self.db.save_game_result(
                 chat_id=chat_id,
                 finished_at=datetime.now(timezone.utc).isoformat(),
+                quiz_mode=state.quiz_mode,
                 winner_user_id=winner.user_id if winner else None,
                 winner_username=winner.username if winner else None,
                 winner_points=winner.points if winner else 0,

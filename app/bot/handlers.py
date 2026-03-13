@@ -11,9 +11,13 @@ from app.config import settings
 from app.core.game_manager import GameManager
 from app.core.health_service import HealthService
 from app.core.last_game_service import LastGameService
+from app.core.leaderboard_service import LeaderboardService
 from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
+
+
+logger = logging.getLogger(__name__)
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +59,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     web_search = WebSearchProvider()
     health_service = HealthService()
     last_game_service = LastGameService(game_manager.quiz_engine)
+    leaderboard_service = LeaderboardService()
 
     async def _get_bot_username(message: Message) -> str:
         if bot_username_cache['value']:
@@ -153,14 +158,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
-        if not rows:
-            await message.answer('Пока статистики по этому чату нет.', reply_markup=main_menu_kb())
-            return
-
-        lines = ['📈 Топ игроков чата:']
-        for idx, (username, total_points, wins, games_played) in enumerate(rows, start=1):
-            lines.append(f'{idx}. @{username} — очки: {total_points}, победы: {wins}, игр: {games_played}')
-        await message.answer('\n'.join(lines), reply_markup=main_menu_kb())
+        await message.answer(leaderboard_service.format_chat_top(rows), reply_markup=main_menu_kb())
 
     async def _send_season(message: Message) -> None:
         text = await game_manager.get_season_product_text(message.chat.id)
@@ -168,14 +166,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     async def _send_weekly(message: Message) -> None:
         rows = await db.get_weekly_top_players(message.chat.id, limit=10)
-        if not rows:
-            await message.answer('За эту неделю пока нет результатов.', reply_markup=main_menu_kb())
-            return
-
-        lines = ['🗓 Недельный топ игроков:']
-        for idx, (username, total_points, wins, games_played) in enumerate(rows, start=1):
-            lines.append(f'{idx}. @{username} — очки: {total_points}, победы: {wins}, игр: {games_played}')
-        await message.answer('\n'.join(lines), reply_markup=main_menu_kb())
+        await message.answer(leaderboard_service.format_weekly_top(rows), reply_markup=main_menu_kb())
 
     async def _send_profile(message: Message) -> None:
         if not message.from_user:

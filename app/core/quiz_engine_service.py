@@ -17,6 +17,7 @@ class QuizEngineService:
             'classic': '🎯 Классика',
             'blitz': '🔥 Блиц',
             'epic': '👑 Эпик',
+            'team2v2': '🤝 Командный 2v2',
         }
         return mapping.get(quiz_mode, '🎯 Классика')
 

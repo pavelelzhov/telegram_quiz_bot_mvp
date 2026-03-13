@@ -22,6 +22,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id INTEGER NOT NULL,
                     finished_at TEXT NOT NULL,
+                    quiz_mode TEXT NOT NULL DEFAULT 'classic',
                     winner_user_id INTEGER,
                     winner_username TEXT,
                     winner_points INTEGER NOT NULL DEFAULT 0,
@@ -56,6 +57,14 @@ class Database:
                 )
                 '''
             )
+
+            async with db.execute('PRAGMA table_info(game_results)') as cursor:
+                cols = await cursor.fetchall()
+            col_names = {row[1] for row in cols}
+            if 'quiz_mode' not in col_names:
+                await db.execute(
+                    "ALTER TABLE game_results ADD COLUMN quiz_mode TEXT NOT NULL DEFAULT 'classic'"
+                )
             await db.commit()
 
     def _week_start(self, iso_value: str) -> str:
@@ -72,6 +81,7 @@ class Database:
         self,
         chat_id: int,
         finished_at: str,
+        quiz_mode: str,
         winner_user_id: Optional[int],
         winner_username: Optional[str],
         winner_points: int,
@@ -84,10 +94,10 @@ class Database:
             await db.execute(
                 '''
                 INSERT INTO game_results (
-                    chat_id, finished_at, winner_user_id, winner_username, winner_points, total_questions
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    chat_id, finished_at, quiz_mode, winner_user_id, winner_username, winner_points, total_questions
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''',
-                (chat_id, finished_at, winner_user_id, winner_username, winner_points, total_questions),
+                (chat_id, finished_at, quiz_mode, winner_user_id, winner_username, winner_points, total_questions),
             )
 
             for user_id, username, points in all_scores:
@@ -169,6 +179,25 @@ class Database:
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [(row[0], row[1], row[2], row[3]) for row in rows]
+
+    async def get_last_game_result(self, chat_id: int) -> Optional[dict[str, object]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                '''
+                SELECT id, chat_id, finished_at, winner_user_id, winner_username, winner_points, total_questions
+                    , quiz_mode
+                FROM game_results
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                ''',
+                (chat_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                return dict(row)
 
     async def healthcheck(self) -> bool:
         try:

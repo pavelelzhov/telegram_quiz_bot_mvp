@@ -145,6 +145,23 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def _send_status(message: Message) -> None:
         await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
 
+    async def _send_settings(message: Message) -> None:
+        await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+
+    async def _send_hint(message: Message) -> None:
+        text = await game_manager.give_hint(message.bot, message.chat.id)
+        await _reply_if_error(message, text)
+
+    async def _send_skip(message: Message) -> None:
+        text = await game_manager.skip_question(message.bot, message.chat.id)
+        await _reply_if_error(message, text)
+
+    async def _stop_quiz(message: Message, reason: str) -> None:
+        if not await _ensure_control_allowed(message):
+            return
+        text = await game_manager.stop_game(message.bot, message.chat.id, reason)
+        await _reply_if_error(message, text)
+
     @router.message(Command('start'))
     async def cmd_start(message: Message) -> None:
         await message.answer(_help_text(message.chat.id), reply_markup=main_menu_kb())
@@ -172,10 +189,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('quiz_stop'))
     async def cmd_quiz_stop(message: Message) -> None:
-        if not await _ensure_control_allowed(message):
-            return
-        text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена командой.')
-        await _reply_if_error(message, text)
+        await _stop_quiz(message, 'Игра остановлена командой.')
 
     @router.message(Command('quiz_status'))
     async def cmd_quiz_status(message: Message) -> None:
@@ -183,13 +197,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('hint'))
     async def cmd_hint(message: Message) -> None:
-        text = await game_manager.give_hint(message.bot, message.chat.id)
-        await _reply_if_error(message, text)
+        await _send_hint(message)
 
     @router.message(Command('skip'))
     async def cmd_skip(message: Message) -> None:
-        text = await game_manager.skip_question(message.bot, message.chat.id)
-        await _reply_if_error(message, text)
+        await _send_skip(message)
 
     @router.message(Command('score'))
     async def cmd_score(message: Message) -> None:
@@ -207,7 +219,25 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:
-        await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_settings(message)
+
+    @router.message(Command('health'))
+    async def cmd_health(message: Message) -> None:
+        if not await _is_admin(message):
+            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
+            return
+
+        db_ok = await db.healthcheck()
+        llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
+        web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
+
+        text = (
+            '🩺 Health-check\n'
+            f'Database: {"OK" if db_ok else "FAIL"}\n'
+            f'LLM config: {"OK" if llm_configured else "MISSING"}\n'
+            f'Web search config: {"OK" if web_search_enabled else "DISABLED"}'
+        )
+        await message.answer(text, reply_markup=main_menu_kb())
 
     @router.message(Command('health'))
     async def cmd_health(message: Message) -> None:
@@ -258,7 +288,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '⚙️ Настройки')
     async def btn_settings(message: Message) -> None:
-        await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_settings(message)
 
     @router.message(F.text == '⏱ Таймер')
     async def btn_timeout(message: Message) -> None:
@@ -309,13 +339,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:
-        text = await game_manager.give_hint(message.bot, message.chat.id)
-        await _reply_if_error(message, text)
+        await _send_hint(message)
 
     @router.message(F.text == '⏭ Пропустить')
     async def btn_skip(message: Message) -> None:
-        text = await game_manager.skip_question(message.bot, message.chat.id)
-        await _reply_if_error(message, text)
+        await _send_skip(message)
 
     @router.message(F.text == '🏆 Очки')
     async def btn_score(message: Message) -> None:
@@ -331,10 +359,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '⛔ Стоп')
     async def btn_stop(message: Message) -> None:
-        if not await _ensure_control_allowed(message):
-            return
-        text = await game_manager.stop_game(message.bot, message.chat.id, 'Игра остановлена кнопкой.')
-        await _reply_if_error(message, text)
+        await _stop_quiz(message, 'Игра остановлена кнопкой.')
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:

@@ -78,7 +78,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             '— сезонный рейтинг\n\n'
             '/season — сезонный топ\n'
             '/weekly — недельный топ\n'
-            '/me — твой профиль'
+            '/me — твой профиль\n'
+            '/team_alpha /team_beta — выбор команды 2v2\n'
+            '/team_lobby — состав команд 2v2\n'
+            '/team_start — старт командной игры'
         )
 
     async def _start_quiz(message: Message, question_limit: int, quiz_mode: str) -> None:
@@ -213,6 +216,34 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_quiz_stop(message: Message) -> None:
         await _stop_quiz(message, 'Игра остановлена командой.')
 
+    @router.message(Command('team_alpha'))
+    async def cmd_team_alpha(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, 'alpha')
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    @router.message(Command('team_beta'))
+    async def cmd_team_beta(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, 'beta')
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    @router.message(Command('team_lobby'))
+    async def cmd_team_lobby(message: Message) -> None:
+        await message.answer(game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
+
+    @router.message(Command('team_start'))
+    async def cmd_team_start(message: Message) -> None:
+        await _start_quiz(message, 10, 'team2v2')
+
+    @router.message(Command('team_stop'))
+    async def cmd_team_stop(message: Message) -> None:
+        await _stop_quiz(message, 'Командная игра остановлена командой.')
+
     @router.message(Command('quiz_status'))
     async def cmd_quiz_status(message: Message) -> None:
         await _send_status(message)
@@ -306,9 +337,41 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def btn_season(message: Message) -> None:
         await _send_season(message)
 
+    @router.message(F.text == '🗓 Неделя')
+    async def btn_weekly(message: Message) -> None:
+        await _send_weekly(message)
+
     @router.message(F.text == '🙋 Профиль')
     async def btn_profile(message: Message) -> None:
         await _send_profile(message)
+
+    @router.message(F.text == '🟥 Team Alpha')
+    async def btn_team_alpha(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, 'alpha')
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🟦 Team Beta')
+    async def btn_team_beta(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, 'beta')
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🤝 Лобби 2v2')
+    async def btn_team_lobby(message: Message) -> None:
+        await message.answer(game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🚀 Старт 2v2')
+    async def btn_team_start(message: Message) -> None:
+        await _start_quiz(message, 10, 'team2v2')
+
+    @router.message(F.text == '🛑 Стоп 2v2')
+    async def btn_team_stop(message: Message) -> None:
+        await _stop_quiz(message, 'Командная игра остановлена кнопкой.')
 
     @router.message(F.text.in_(list(BUTTON_TO_CATEGORY.keys())))
     async def btn_set_category(message: Message) -> None:
@@ -345,6 +408,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '🤖 Host-режим')
     async def btn_host_mode(message: Message) -> None:
         await _toggle_setting(message, game_manager.toggle_host_mode, '🤖 Host-режим')
+
+    @router.message(F.text == '🩺 Health')
+    async def btn_health(message: Message) -> None:
+        await cmd_health(message)
 
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:

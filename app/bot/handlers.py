@@ -175,6 +175,19 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_stats(message: Message) -> None:
         await _send_top(message)
 
+    @router.message(Command('web'))
+    async def cmd_web(message: Message) -> None:
+        if not message.from_user or not message.text:
+            return
+
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        result = await web_search.search_and_summarize(
+            chat_title=message.chat.title or 'Чат',
+            username=username,
+            raw_text=message.text,
+        )
+        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:
         await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
@@ -301,7 +314,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not message.from_user or not message.text:
             return
 
-        if message.text.startswith('/') or message.text in BUTTON_TEXTS:
+        if (message.text.startswith('/') and not message.text.startswith('/web')) or message.text in BUTTON_TEXTS:
             return
 
         username = message.from_user.username or message.from_user.full_name.replace(' ', '_')

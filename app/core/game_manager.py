@@ -18,6 +18,7 @@ from app.core.chat_agent_service import ChatAgentService
 from app.core.invite_service import InviteService
 from app.core.models import ChatSettings, GameState, PlayerScore, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
+from app.core.team_mode_service import TeamModeService
 from app.providers.llm_provider import CATEGORY_RANDOM, LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
@@ -47,6 +48,7 @@ class GameManager:
         self.start_locks: Dict[int, asyncio.Lock] = {}
         self.chat_histories: Dict[int, Deque[dict[str, str]]] = defaultdict(lambda: deque(maxlen=20))
         self.chat_last_reply_ts: Dict[int, float] = defaultdict(lambda: 0.0)
+        self.team_mode = TeamModeService()
 
     def _get_start_lock(self, chat_id: int) -> asyncio.Lock:
         lock = self.start_locks.get(chat_id)
@@ -129,6 +131,12 @@ class GameManager:
     def get_preferred_category(self, chat_id: int) -> str:
         return self.preferred_categories.get(chat_id, CATEGORY_RANDOM)
 
+    def set_team_choice(self, chat_id: int, user_id: int, username: str, team: str) -> str:
+        return self.team_mode.set_team_choice(chat_id, user_id, username, team)
+
+    def get_team_lobby_text(self, chat_id: int) -> str:
+        return self.team_mode.get_team_lobby_text(chat_id)
+
     async def start_game(
         self,
         bot: Bot,
@@ -155,6 +163,13 @@ class GameManager:
 
             preferred_category = self.get_preferred_category(chat_id)
             cfg = self.get_chat_settings(chat_id)
+            team_assignments: dict[int, str] = {}
+
+            if quiz_mode == 'team2v2':
+                built = self.team_mode.build_team_assignments(chat_id)
+                if built is None:
+                    return f'Для 2v2 нужны команды 2 на 2.\n{self.get_team_lobby_text(chat_id)}'
+                team_assignments = built
 
             state = GameState(
                 chat_id=chat_id,
@@ -162,6 +177,7 @@ class GameManager:
                 question_limit=question_limit,
                 preferred_category=preferred_category,
                 quiz_mode=quiz_mode,
+                team_assignments=team_assignments,
             )
             self.games[chat_id] = state
 
@@ -233,6 +249,9 @@ class GameManager:
     async def handle_answer(self, bot: Bot, chat_id: int, user_id: int, username: str, text: str) -> bool:
         state = self.games.get(chat_id)
         if not state or not state.is_active or not state.current_question:
+            return False
+        if state.quiz_mode == 'team2v2' and user_id not in state.team_assignments:
+            await bot.send_message(chat_id, f'@{username}, выбери команду: /team_alpha или /team_beta.')
             return False
         if state.current_question_answered:
             return False
@@ -414,6 +433,8 @@ class GameManager:
         lines = [f'🏆 Текущие очки ({self._mode_label(state.quiz_mode)}):']
         for idx, player in enumerate(ranking, start=1):
             lines.append(f'{idx}. @{player.username} — {player.points}')
+        if state.quiz_mode == 'team2v2':
+            lines.extend([''] + self.team_mode.team_score_lines(state))
         return '\n'.join(lines)
 
     def get_status_text(self, chat_id: int) -> str:
@@ -432,7 +453,7 @@ class GameManager:
                 f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
             )
 
-        return (
+        text = (
             '📊 Статус игры\n'
             f'Режим: {self._mode_label(state.quiz_mode)}\n'
             f'Профиль игры: {self.quiz_engine.game_profile_label(cfg.game_profile)}\n'
@@ -445,6 +466,9 @@ class GameManager:
             f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}'
         )
+        if state.quiz_mode == 'team2v2':
+            text += '\n\n' + '\n'.join(self.team_mode.team_score_lines(state))
+        return text
 
     def _leader_line(self, state: GameState) -> str:
         if not state.scores:
@@ -605,6 +629,9 @@ class GameManager:
             summary = ['🏁 Игра завершена!', '', f'Режим: {self._mode_label(state.quiz_mode)}', '', 'Итоговая таблица:']
             for idx, player in enumerate(ranking, start=1):
                 summary.append(f'{idx}. @{player.username} — {player.points}')
+            if state.quiz_mode == 'team2v2':
+                summary.append('')
+                summary.extend(self.team_mode.team_score_lines(state))
             summary.append('')
             summary.append(f'👑 Победитель: @{winner.username}')
             summary.append('💎 Победитель получил +5 сезонных очков')
@@ -618,6 +645,7 @@ class GameManager:
             await self.db.save_game_result(
                 chat_id=chat_id,
                 finished_at=datetime.now(timezone.utc).isoformat(),
+                quiz_mode=state.quiz_mode,
                 winner_user_id=winner.user_id if winner else None,
                 winner_username=winner.username if winner else None,
                 winner_points=winner.points if winner else 0,

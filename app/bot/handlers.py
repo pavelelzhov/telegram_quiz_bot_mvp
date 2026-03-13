@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import time
 import logging
 
 from aiogram import F, Router
@@ -10,9 +9,14 @@ from aiogram.types import Message
 from app.bot.keyboards import BUTTON_TEXTS, BUTTON_TO_CATEGORY, main_menu_kb
 from app.config import settings
 from app.core.game_manager import GameManager
+from app.core.health_service import HealthService
+from app.core.last_game_service import LastGameService
 from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
+
+
+logger = logging.getLogger(__name__)
 
 
 logger = logging.getLogger(__name__)
@@ -22,6 +26,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     router = Router()
     bot_username_cache: dict[str, str | None] = {'value': None}
     web_search = WebSearchProvider()
+    health_service = HealthService()
+    last_game_service = LastGameService(game_manager.quiz_engine)
 
     async def _get_bot_username(message: Message) -> str:
         if bot_username_cache['value']:
@@ -153,21 +159,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     async def _send_last_game(message: Message) -> None:
         data = await db.get_last_game_result(message.chat.id)
-        if not data:
-            await message.answer('В этом чате пока нет завершённых игр.', reply_markup=main_menu_kb())
-            return
-
-        winner = f'@{data["winner_username"]}' if data.get('winner_username') else 'нет победителя'
-        mode = game_manager.quiz_engine.mode_label(str(data.get('quiz_mode') or 'classic'))
-        text = (
-            '🕘 Последняя игра\n'
-            f'ID: {data["id"]}\n'
-            f'Режим: {mode}\n'
-            f'Время: {data["finished_at"]}\n'
-            f'Победитель: {winner}\n'
-            f'Очки победителя: {data["winner_points"]}\n'
-            f'Вопросов: {data["total_questions"]}'
-        )
+        text = last_game_service.format_last_game_text(data)
         await message.answer(text, reply_markup=main_menu_kb())
 
     async def _set_team_and_reply(message: Message, team: str) -> None:
@@ -339,12 +331,6 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _is_admin(message):
             await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
             return
-
-        db_started = time.perf_counter()
-        db_ok = await db.healthcheck()
-        db_ms = (time.perf_counter() - db_started) * 1000
-
-        llm_started = time.perf_counter()
         llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
         llm_ms = (time.perf_counter() - llm_started) * 1000
 
@@ -377,13 +363,14 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             },
         )
 
-        text = (
-            '🩺 Health-check\n'
-            f'Overall: {overall}\n'
-            f'Database: {db_status} ({db_ms:.1f} ms)\n'
-            f'LLM config: {llm_status} ({llm_ms:.1f} ms)\n'
-            f'Web search config: {web_status} ({web_ms:.1f} ms)'
+        snapshot = await health_service.check(
+            chat_id=message.chat.id,
+            db=db,
+            llm_configured=llm_configured,
+            web_search_enabled=web_search_enabled,
+            logger=logger,
         )
+        text = health_service.format_text(snapshot)
         await message.answer(text, reply_markup=main_menu_kb())
 
     @router.message(F.text == '🎯 Классика 10')

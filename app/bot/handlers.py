@@ -117,22 +117,45 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             lines.append(f'{idx}. @{username} — очки: {total_points}, победы: {wins}, игр: {games_played}')
         await message.answer('\n'.join(lines), reply_markup=main_menu_kb())
 
+    async def _send_season(message: Message) -> None:
+        text = await game_manager.get_season_product_text(message.chat.id)
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    async def _send_profile(message: Message) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
+        await message.answer(text, reply_markup=main_menu_kb())
+
+    async def _send_web_search(message: Message, raw_text: str) -> None:
+        if not message.from_user:
+            return
+        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
+        result = await web_search.search_and_summarize(
+            chat_title=message.chat.title or 'Чат',
+            username=username,
+            raw_text=raw_text,
+        )
+        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+
+    async def _send_score(message: Message) -> None:
+        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+
+    async def _send_status(message: Message) -> None:
+        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+
     @router.message(Command('start'))
     async def cmd_start(message: Message) -> None:
         await message.answer(_help_text(message.chat.id), reply_markup=main_menu_kb())
 
     @router.message(Command('season'))
     async def cmd_season(message: Message) -> None:
-        text = await game_manager.get_season_product_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_season(message)
 
     @router.message(Command('me'))
     async def cmd_me(message: Message) -> None:
-        if not message.from_user:
-            return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_profile(message)
 
     @router.message(Command('quiz_start'))
     async def cmd_quiz_start(message: Message, command: CommandObject) -> None:
@@ -156,7 +179,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('quiz_status'))
     async def cmd_quiz_status(message: Message) -> None:
-        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_status(message)
 
     @router.message(Command('hint'))
     async def cmd_hint(message: Message) -> None:
@@ -170,7 +193,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('score'))
     async def cmd_score(message: Message) -> None:
-        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_score(message)
 
     @router.message(Command('stats'))
     async def cmd_stats(message: Message) -> None:
@@ -178,15 +201,9 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('web'))
     async def cmd_web(message: Message) -> None:
-        if not message.from_user or not message.text:
+        if not message.text:
             return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        result = await web_search.search_and_summarize(
-            chat_title=message.chat.title or 'Чат',
-            username=username,
-            raw_text=message.text,
-        )
-        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+        await _send_web_search(message, message.text)
 
     @router.message(Command('settings'))
     async def cmd_settings(message: Message) -> None:
@@ -224,16 +241,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🏅 Сезон')
     async def btn_season(message: Message) -> None:
-        text = await game_manager.get_season_product_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_season(message)
 
     @router.message(F.text == '🙋 Профиль')
     async def btn_profile(message: Message) -> None:
-        if not message.from_user:
-            return
-        username = message.from_user.username or message.from_user.full_name.replace(' ', '_')
-        text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _send_profile(message)
 
     @router.message(F.text.in_(list(BUTTON_TO_CATEGORY.keys())))
     async def btn_set_category(message: Message) -> None:
@@ -307,11 +319,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🏆 Очки')
     async def btn_score(message: Message) -> None:
-        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_score(message)
 
     @router.message(F.text == '📊 Статус')
     async def btn_status(message: Message) -> None:
-        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+        await _send_status(message)
 
     @router.message(F.text == '👥 Топ')
     async def btn_stats(message: Message) -> None:
@@ -336,7 +348,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         addressed = await _is_addressed_to_bot(message)
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):
-            await _send_web_result(message, message.text)
+            await _send_web_search(message, message.text)
             return
 
         answered = await game_manager.handle_answer(

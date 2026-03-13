@@ -13,6 +13,7 @@ from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
 from app.core.answer_flow_service import AnswerFlowService
 from app.core.chat_config_service import ChatConfigService
+from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
 from app.core.invite_service import InviteService
@@ -38,6 +39,7 @@ class GameManager:
         self.invite_service = InviteService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
         self.answer_flow = AnswerFlowService()
+        self.chat_participation = ChatParticipationService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService()
         self.chat_config = ChatConfigService()
@@ -304,24 +306,23 @@ class GameManager:
             return False
 
         now = time.time()
-        if addressed:
-            cooldown = 8.0
-        elif cfg.host_mode_enabled:
-            cooldown = 35.0
-        else:
+        cooldown = self.chat_participation.resolve_cooldown(
+            addressed=addressed,
+            host_mode_enabled=cfg.host_mode_enabled,
+        )
+        if cooldown is None:
             return False
 
         if now - self.chat_last_reply_ts[chat_id] < cooldown:
             return False
 
         if not addressed:
-            if self._recent_unique_user_count(chat_id, 180) < 2:
-                return False
-            if self._recent_message_count(chat_id, 180) < 5:
-                return False
-            if len(text.strip()) < 10:
-                return False
-            if random.random() > 0.18:
+            if not self.chat_participation.passes_passive_reply_filters(
+                recent_unique_users=self._recent_unique_user_count(chat_id, 180),
+                recent_messages=self._recent_message_count(chat_id, 180),
+                text=text,
+                random_value=random.random(),
+            ):
                 return False
 
         reply = await self.chat_agent_service.generate_reply(

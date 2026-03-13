@@ -117,6 +117,7 @@ class LLMQuestionProvider:
         self.model = settings.openai_model
         self.history = QuizHistoryStore()
         self.music_rounds = self._load_music_rounds()
+        self.semantic_repeat_stats: dict[int, dict[str, float]] = {}
 
     async def generate_question(
         self,
@@ -328,6 +329,8 @@ class LLMQuestionProvider:
 
         best_question: QuizQuestion | None = None
         best_score = -10_000.0
+        semantic_hits = 0
+        max_similarity_seen = 0.0
 
         for _ in range(3):
             candidates = await self._generate_candidates_via_llm(
@@ -341,7 +344,7 @@ class LLMQuestionProvider:
 
             for payload in candidates:
                 key = self._question_key(payload.question, payload.answer)
-                score = self._score_candidate(
+                score, similarity_hit, similarity_value = self._score_candidate(
                     payload=payload,
                     key=key,
                     recent_keys=recent_keys,
@@ -351,6 +354,10 @@ class LLMQuestionProvider:
                     stage=stage,
                     preferred_difficulty=preferred_difficulty,
                 )
+                if similarity_hit:
+                    semantic_hits += 1
+                if similarity_value > max_similarity_seen:
+                    max_similarity_seen = similarity_value
                 if score > best_score:
                     best_score = score
                     best_question = QuizQuestion(**payload.model_dump(), key=key, source='llm')
@@ -360,6 +367,11 @@ class LLMQuestionProvider:
 
         if not best_question:
             raise ValueError('No valid candidate question.')
+
+        self.semantic_repeat_stats[chat_id] = {
+            'semantic_hits': float(semantic_hits),
+            'max_similarity': round(max_similarity_seen, 3),
+        }
 
         return best_question
 
@@ -555,9 +567,9 @@ class LLMQuestionProvider:
         recent_answers: list[str],
         stage: str,
         preferred_difficulty: str | None,
-    ) -> float:
+    ) -> tuple[float, bool, float]:
         if key in recent_keys:
-            return -10_000.0
+            return -10_000.0, False, 0.0
 
         score = 10.0
         answer_norm = normalize_text(payload.answer)
@@ -571,6 +583,9 @@ class LLMQuestionProvider:
             score -= 4.0
         if answer_norm in recent_answer_norms:
             score -= 4.0
+
+        semantic_penalty, max_similarity = self._semantic_repeat_penalty(payload, recent_topics, recent_answers)
+        score -= semantic_penalty
 
         if len(payload.aliases) >= 1:
             score += 0.4
@@ -594,7 +609,40 @@ class LLMQuestionProvider:
         if preferred_difficulty and payload.difficulty == preferred_difficulty:
             score += 0.35
 
-        return score
+        return score, max_similarity >= 0.60, max_similarity
+
+    def _semantic_repeat_penalty(
+        self,
+        payload: QuestionPayload,
+        recent_topics: list[str],
+        recent_answers: list[str],
+    ) -> tuple[float, float]:
+        candidate_tokens = self._token_set(f'{payload.topic} {payload.answer}')
+        if not candidate_tokens:
+            return 0.0, 0.0
+
+        max_similarity = 0.0
+        for item in [*recent_topics[-8:], *recent_answers[-8:]]:
+            recent_tokens = self._token_set(item)
+            if not recent_tokens:
+                continue
+            inter = len(candidate_tokens & recent_tokens)
+            union = len(candidate_tokens | recent_tokens)
+            if union == 0:
+                continue
+            similarity = inter / union
+            if similarity > max_similarity:
+                max_similarity = similarity
+
+        if max_similarity >= 0.80:
+            return 3.0, max_similarity
+        if max_similarity >= 0.60:
+            return 1.5, max_similarity
+        return 0.0, max_similarity
+
+    def _token_set(self, value: str) -> set[str]:
+        cleaned = normalize_text(value)
+        return {token for token in cleaned.split() if len(token) >= 3}
 
     def _pick_text_fallback_question(self, chat_id: int, recent_keys: Iterable[str], category: str) -> dict[str, Any]:
         recent_set = set(recent_keys)

@@ -18,6 +18,11 @@
 - `/quiz_start 15`
 - `/quiz_stop`
 - `/quiz_status`
+- `/team_alpha` / `/team_beta` (выбор команды)
+- `/team_lobby`
+- `/team_start`
+- `/team_stop`
+- `/last_game`
 - `/hint`
 - `/skip`
 - `/score`

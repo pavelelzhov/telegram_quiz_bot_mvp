@@ -199,26 +199,11 @@ class GameManager:
 
             cache_size = await self.db.get_valid_llm_questions_count()
             if cache_size < self.quiz_engine.MIN_START_CACHE_SIZE:
-                asyncio.create_task(
-                    self.quiz_engine.maybe_start_background_cache_refill(
-                        chat_id=chat_id,
-                        quiz_mode=quiz_mode,
-                        preferred_category=preferred_category,
-                    )
-                )
-                await bot.send_message(
-                    chat_id,
-                    (
-                        'Кэш вопросов ещё недостаточно прогрет для уверенного старта без повторов. '
-                        f'Сейчас: {cache_size}, минимум для старта: {self.quiz_engine.MIN_START_CACHE_SIZE}.\n'
-                        'Я уже запустила пополнение. Проверь /buffer_status чуть позже.'
-                    ),
-                )
                 log_operation(
                     logger,
                     operation='game_start',
                     chat_id=chat_id,
-                    result='cache_below_start_threshold',
+                    result='cache_below_start_threshold_soft',
                     duration_ms=(time.perf_counter() - started) * 1000,
                     extra={
                         'question_limit': question_limit,
@@ -226,9 +211,8 @@ class GameManager:
                         'cache_size': cache_size,
                         'min_start_cache_size': self.quiz_engine.MIN_START_CACHE_SIZE,
                     },
-                    level=logging.WARNING,
+                    level=logging.INFO,
                 )
-                return 'Сейчас нет достаточного запаса вопросов для старта. Попробуй позже.'
 
             try:
                 await asyncio.wait_for(
@@ -242,23 +226,28 @@ class GameManager:
 
             if not state.question_buffer:
                 cache_size = await self.db.get_valid_llm_questions_count()
-                asyncio.create_task(
-                    self.quiz_engine.maybe_start_background_cache_refill(
-                        chat_id=chat_id,
-                        quiz_mode=quiz_mode,
-                        preferred_category=preferred_category,
-                    )
-                )
                 guidance = 'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.'
-                if cache_size >= self.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+                if settings.quiz_allow_generation:
+                    asyncio.create_task(
+                        self.quiz_engine.maybe_start_background_cache_refill(
+                            chat_id=chat_id,
+                            quiz_mode=quiz_mode,
+                            preferred_category=preferred_category,
+                        )
+                    )
+                    if cache_size >= self.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+                        guidance = (
+                            'Похоже, текущие фильтры повторов слишком строгие для этого чата. '
+                            'Попробуй /quiz_repeat_rules 1 и запусти ещё раз.'
+                        )
+                else:
                     guidance = (
-                        'Похоже, текущие фильтры повторов слишком строгие для этого чата. '
-                        'Попробуй /quiz_repeat_rules 1 и запусти ещё раз.'
+                        'Автогенерация отключена: работаем только из текущего буфера. '
+                        'Проверь /buffer_status и при необходимости ослабь фильтры /quiz_repeat_rules 1.'
                     )
                 await bot.send_message(
                     chat_id,
-                    'Пока не удалось получить LLM-вопросы. '
-                    'Я уже запустил фоновое пополнение кэша. '
+                    'Пока не удалось получить вопросы из буфера. '
                     f'{guidance}',
                 )
                 log_operation(
@@ -737,7 +726,8 @@ class GameManager:
             await self.quiz_engine.prepare_question_buffer(state, list(state.scores.keys()))
             question = await self.quiz_engine.select_next_question(state)
             if question is None:
-                await self.quiz_engine.request_generation_if_buffer_low(state)
+                if settings.quiz_allow_generation:
+                    await self.quiz_engine.request_generation_if_buffer_low(state)
                 question = await self.quiz_engine.select_next_question(state)
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)

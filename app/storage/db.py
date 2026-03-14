@@ -253,6 +253,45 @@ class Database:
                 row = await cursor.fetchone()
         return int(row[0]) if row else 0
 
+    async def get_llm_question_breakdown(self, top_categories_limit: int = 8) -> dict[str, Any]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+
+            async with db.execute(
+                "SELECT COUNT(1) AS total FROM llm_questions WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
+            ) as cursor:
+                total_row = await cursor.fetchone()
+
+            async with db.execute(
+                """
+                SELECT difficulty, COUNT(1) AS cnt
+                FROM llm_questions
+                WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                GROUP BY difficulty
+                ORDER BY cnt DESC, difficulty ASC
+                """
+            ) as cursor:
+                difficulty_rows = await cursor.fetchall()
+
+            async with db.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(topic), ''), 'Общие знания') AS topic_name, COUNT(1) AS cnt
+                FROM llm_questions
+                WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                GROUP BY topic_name
+                ORDER BY cnt DESC, topic_name ASC
+                LIMIT ?
+                """,
+                (max(1, int(top_categories_limit)),),
+            ) as cursor:
+                category_rows = await cursor.fetchall()
+
+        return {
+            'total': int(total_row['total']) if total_row else 0,
+            'difficulty': {str(row['difficulty']): int(row['cnt']) for row in difficulty_rows},
+            'top_categories': [(str(row['topic_name']), int(row['cnt'])) for row in category_rows],
+        }
+
     async def get_candidate_questions(
         self,
         difficulty: str,

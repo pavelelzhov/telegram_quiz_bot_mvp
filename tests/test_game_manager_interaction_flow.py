@@ -10,6 +10,7 @@ os.environ.setdefault('OPENAI_API_KEY', 'test-openai-key')
 
 from app.core.game_manager import GameManager
 from app.core.models import QuestionCandidate
+from app.config import settings
 from app.storage.db import Database
 
 
@@ -55,6 +56,13 @@ class _BatchProvider:
 
 
 class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._old_generation = settings.quiz_allow_generation
+        settings.quiz_allow_generation = True
+
+    def tearDown(self) -> None:
+        settings.quiz_allow_generation = self._old_generation
+
     def _build_db_path(self, tmp_dir: str) -> str:
         return str(Path(tmp_dir) / 'interaction_flow.db')
 

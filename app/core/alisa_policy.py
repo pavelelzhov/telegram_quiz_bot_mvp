@@ -133,9 +133,37 @@ class PersonaPolicyService:
             return 'pushback'
         if any(token in lowered for token in ('мне плохо', 'день в мусор', 'устал', 'тяжело', 'тревожно')):
             return 'warm_support'
+        if addressed_by and self._contains_micro_reaction_token(lowered):
+            return 'micro_reaction'
         if addressed_by:
             return 'addressed_reply'
         return 'observed_silence'
+
+    def _contains_micro_reaction_token(self, lowered_text: str) -> bool:
+        micro_tokens = (
+            'спасибо',
+            'пасиб',
+            'благодарю',
+            'привет',
+            'здорово',
+            'доброе утро',
+            'добрый вечер',
+            'лол',
+            'ахах',
+            'хаха',
+            'ок',
+            'оке',
+            'понял',
+            'поняла',
+        )
+        for token in micro_tokens:
+            if ' ' in token:
+                if token in lowered_text:
+                    return True
+                continue
+            if re.search(rf'(?<!\w){re.escape(token)}(?!\w)', lowered_text, flags=re.IGNORECASE):
+                return True
+        return False
 
 
 class InitiativeService:

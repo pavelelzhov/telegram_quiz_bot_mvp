@@ -212,15 +212,44 @@ class QuizEngineService:
             return
         game_state.generation_inflight = True
         try:
-            batch = await self.llm_provider.generate_question_batch(
-                {
-                    'chat_id': game_state.chat_id,
-                    'count': 10,
-                    'difficulty': 'medium',
-                    'mode': game_state.quiz_mode,
-                    'llm_only': True,
-                }
-            )
+            preferred_difficulty = game_state.target_difficulty_by_player.get(game_state.started_by_user_id, 'medium')
+            attempts = [
+                {'difficulty': preferred_difficulty, 'category': game_state.preferred_category},
+                {'difficulty': preferred_difficulty, 'category': 'Случайно'},
+                {'difficulty': 'medium', 'category': 'Случайно'},
+            ]
+            batch = []
+            for idx, attempt in enumerate(attempts, start=1):
+                batch = await self.llm_provider.generate_question_batch(
+                    {
+                        'chat_id': game_state.chat_id,
+                        'count': 10,
+                        'difficulty': attempt['difficulty'],
+                        'category': attempt['category'],
+                        'mode': game_state.quiz_mode,
+                        'llm_only': True,
+                    }
+                )
+                if batch:
+                    if idx > 1:
+                        logger.info(
+                            'LLM batch refill recovered on attempt=%s chat_id=%s difficulty=%s category=%s size=%s',
+                            idx,
+                            game_state.chat_id,
+                            attempt['difficulty'],
+                            attempt['category'],
+                            len(batch),
+                        )
+                    break
+
+                logger.warning(
+                    'LLM batch refill attempt returned empty batch: attempt=%s chat_id=%s difficulty=%s category=%s',
+                    idx,
+                    game_state.chat_id,
+                    attempt['difficulty'],
+                    attempt['category'],
+                )
+
             validator = getattr(self.llm_provider, 'validate_question_batch', None)
             if callable(validator):
                 valid_batch = validator(batch)

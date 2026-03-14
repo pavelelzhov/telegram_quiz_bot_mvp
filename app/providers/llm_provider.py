@@ -771,22 +771,44 @@ class LLMQuestionProvider:
         difficulty = str(request.get('difficulty', 'medium'))
         mode = str(request.get('mode', 'classic'))
         llm_only = bool(request.get('llm_only', False))
+        chat_id = int(request.get('chat_id', 0))
+
         batch: list[QuestionCandidate] = []
         skipped_non_llm = 0
         skipped_sources: dict[str, int] = {}
+        recent_keys = set(self.history.recent_keys(chat_id, settings.recent_questions_limit))
+
         for _ in range(max(1, min(count, 20))):
-            question = await self.generate_question(
-                chat_id=int(request.get('chat_id', 0)),
-                used_keys=set(),
-                preferred_category=category,
-                stage='core',
-                preferred_difficulty=difficulty,
-            )
+            if llm_only:
+                selected_category = self._choose_category(chat_id, category, {})
+                try:
+                    question = await self._generate_text_question(
+                        chat_id=chat_id,
+                        recent_keys=recent_keys,
+                        category=selected_category,
+                        stage='core',
+                        preferred_difficulty=difficulty,
+                    )
+                except Exception as exc:
+                    logger.warning('LLM-only batch item generation failed: %s', type(exc).__name__)
+                    continue
+            else:
+                question = await self.generate_question(
+                    chat_id=chat_id,
+                    used_keys=recent_keys,
+                    preferred_category=category,
+                    stage='core',
+                    preferred_difficulty=difficulty,
+                )
+
             if llm_only and question.source != 'llm':
                 skipped_non_llm += 1
                 source = str(question.source or 'unknown')
                 skipped_sources[source] = skipped_sources.get(source, 0) + 1
                 continue
+
+            if question.key:
+                recent_keys.add(question.key)
 
             candidate = QuestionCandidate(
                 provider_name='openai',
@@ -798,6 +820,7 @@ class LLMQuestionProvider:
                 question_type=question.question_type,
                 question_text=question.question,
                 options=[],
+                correct_option_index=None,
                 correct_answer_text=question.answer,
                 explanation=question.explanation,
                 canonical_facts=[question.explanation, question.answer],

@@ -165,6 +165,34 @@ class GameManager:
                 local_game_date=self.daily_challenge.resolve_local_game_date(cfg.timezone),
                 adaptive_enabled=cfg.adaptive_mode_enabled,
             )
+
+            try:
+                await asyncio.wait_for(
+                    self.quiz_engine.prepare_question_buffer(state, [started_by_user_id]),
+                    timeout=4.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning('Прогрев буфера превысил таймаут: chat_id=%s', chat_id)
+            except Exception:
+                logger.exception('Ошибка прогрева буфера перед стартом: chat_id=%s', chat_id)
+
+            if not state.question_buffer:
+                await bot.send_message(
+                    chat_id,
+                    'Пока не удалось получить LLM-вопросы. '
+                    'Проверь /health и попробуй ещё раз через 1-2 минуты.',
+                )
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='no_llm_questions',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'question_limit': question_limit, 'quiz_mode': quiz_mode},
+                    level=logging.WARNING,
+                )
+                return 'Сейчас нет готовых LLM-вопросов для старта. Попробуй позже.'
+
             self.games[chat_id] = state
 
             mode_label = self._mode_label(quiz_mode)

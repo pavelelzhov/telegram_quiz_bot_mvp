@@ -15,8 +15,9 @@ class LlmProviderBatchTests(unittest.TestCase):
                 provider = LLMQuestionProvider()
                 provider.model = 'test-model'
                 provider.validate_question_batch = lambda candidates: candidates
-
-                provider.generate_question = AsyncMock(
+                provider.history = type('HistoryStub', (), {'recent_keys': lambda self, chat_id, limit: []})()
+                provider._choose_category = lambda chat_id, preferred_category, category_bias: 'Общие знания'
+                provider._generate_text_question = AsyncMock(
                     return_value=QuizQuestion(
                         category='Общие знания',
                         difficulty='medium',

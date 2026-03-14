@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramNetworkError
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
@@ -18,6 +19,14 @@ from app.core.chat_history_service import ChatHistoryService
 from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
+from app.core.relationship_profile_service import RelationshipProfileService
+from app.core.decision_audit_service import DecisionAuditEvent, DecisionAuditService
+from app.core.alisa_policy import (
+    AddressingPolicyService,
+    ParticipationDecisionService,
+    PersonaPolicyService,
+    ReplyValidationService,
+)
 from app.core.feedback_text_service import FeedbackTextService
 from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
@@ -32,8 +41,22 @@ from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
 from app.utils.text import normalize_text
+from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
+
+
+def _should_retry_telegram_send(exc: Exception) -> bool:
+    return isinstance(exc, (TelegramNetworkError, asyncio.TimeoutError, OSError))
+
+
+async def safe_bot_send_message(bot: Bot, chat_id: int, text: str, **kwargs: object) -> None:
+    await retry_async(
+        lambda: bot.send_message(chat_id, text, **kwargs),
+        retries=2,
+        base_delay_sec=0.5,
+        should_retry=_should_retry_telegram_send,
+    )
 
 
 class GameManager:
@@ -41,6 +64,7 @@ class GameManager:
         self.db = db
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
+        self.relationship_profiles = RelationshipProfileService(self.memory_store)
         self.chat_agent_service = ChatAgentService(self.memory_store)
         self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
@@ -49,13 +73,18 @@ class GameManager:
         self.difficulty_service = DifficultyService()
         self.answer_flow = AnswerFlowService(db=db, difficulty_service=self.difficulty_service)
         self.chat_participation = ChatParticipationService()
+        self.addressing_policy = AddressingPolicyService()
+        self.participation_decision = ParticipationDecisionService()
+        self.persona_policy = PersonaPolicyService()
+        self.reply_validator = ReplyValidationService()
+        self.decision_audit = DecisionAuditService()
         self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService(db=db, llm_provider=question_provider)
         self.chat_config = ChatConfigService()
         self.round_lifecycle = RoundLifecycleService()
-        self.chat_history = ChatHistoryService(max_items=20)
+        self.chat_history = ChatHistoryService(max_items=settings.alisa_history_window_size)
         self.daily_challenge = DailyChallengeService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
@@ -168,6 +197,39 @@ class GameManager:
                 topic_focus=list(cfg.preferred_topics),
             )
 
+            cache_size = await self.db.get_valid_llm_questions_count()
+            if cache_size < self.quiz_engine.MIN_START_CACHE_SIZE:
+                asyncio.create_task(
+                    self.quiz_engine.maybe_start_background_cache_refill(
+                        chat_id=chat_id,
+                        quiz_mode=quiz_mode,
+                        preferred_category=preferred_category,
+                    )
+                )
+                await bot.send_message(
+                    chat_id,
+                    (
+                        'Кэш вопросов ещё недостаточно прогрет для уверенного старта без повторов. '
+                        f'Сейчас: {cache_size}, минимум для старта: {self.quiz_engine.MIN_START_CACHE_SIZE}.\n'
+                        'Я уже запустила пополнение. Проверь /buffer_status чуть позже.'
+                    ),
+                )
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='cache_below_start_threshold',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={
+                        'question_limit': question_limit,
+                        'quiz_mode': quiz_mode,
+                        'cache_size': cache_size,
+                        'min_start_cache_size': self.quiz_engine.MIN_START_CACHE_SIZE,
+                    },
+                    level=logging.WARNING,
+                )
+                return 'Сейчас нет достаточного запаса вопросов для старта. Попробуй позже.'
+
             try:
                 await asyncio.wait_for(
                     self.quiz_engine.prepare_question_buffer(state, [started_by_user_id]),
@@ -179,6 +241,7 @@ class GameManager:
                 logger.exception('Ошибка прогрева буфера перед стартом: chat_id=%s', chat_id)
 
             if not state.question_buffer:
+                cache_size = await self.db.get_valid_llm_questions_count()
                 asyncio.create_task(
                     self.quiz_engine.maybe_start_background_cache_refill(
                         chat_id=chat_id,
@@ -186,11 +249,17 @@ class GameManager:
                         preferred_category=preferred_category,
                     )
                 )
+                guidance = 'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.'
+                if cache_size >= self.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+                    guidance = (
+                        'Похоже, текущие фильтры повторов слишком строгие для этого чата. '
+                        'Попробуй /quiz_repeat_rules 1 и запусти ещё раз.'
+                    )
                 await bot.send_message(
                     chat_id,
                     'Пока не удалось получить LLM-вопросы. '
                     'Я уже запустил фоновое пополнение кэша. '
-                    'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.',
+                    f'{guidance}',
                 )
                 log_operation(
                     logger,
@@ -350,15 +419,37 @@ class GameManager:
         user_id: int,
         username: str,
         text: str,
-        addressed: bool,
+        is_reply_to_alisa: bool,
+        has_bot_mention: bool,
+        message_id: int | None = None,
     ) -> bool:
         cfg = self.get_chat_settings(chat_id)
         if not cfg.chat_mode_enabled:
             return False
 
-        self.chat_history.remember_message(chat_id, 'user', username, text)
+        addressing = self.addressing_policy.evaluate(
+            text=text,
+            is_reply_to_alisa=is_reply_to_alisa,
+            has_bot_mention=has_bot_mention,
+        )
+        addressed = addressing.is_addressed
+
+        self.chat_history.remember_message(
+            chat_id,
+            'user',
+            username,
+            text,
+            author_id=user_id,
+            addressed_to_alisa=addressed,
+        )
         self.invite_service.remember_activity(chat_id, user_id, username, text)
-        self.memory_store.note_message(chat_id, user_id, username, text)
+        self.relationship_profiles.note_user_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            text=text,
+            addressed_to_alisa=addressed,
+        )
 
         async def _start_quiz(started_by: int) -> None:
             await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
@@ -376,6 +467,9 @@ class GameManager:
         state = self.games.get(chat_id)
         quiz_active = bool(state and state.is_active)
         current_question_text = state.current_question.question if quiz_active and state and state.current_question else None
+        recent_messages = self.invite_service.recent_message_count(chat_id, 180)
+        recent_unique_users = self.invite_service.recent_unique_user_count(chat_id, 180)
+        tension_level = self.relationship_profiles.get_chat_tension_level(chat_id=chat_id)
 
         if cfg.host_mode_enabled and not quiz_active:
             if await self.invite_orchestration.maybe_send_host_invite(
@@ -387,46 +481,173 @@ class GameManager:
             ):
                 return True
 
-        if quiz_active and not addressed:
-            return False
-
-        now = time.time()
-        cooldown = self.chat_participation.resolve_cooldown(
-            addressed=addressed,
-            host_mode_enabled=cfg.host_mode_enabled,
-        )
-        if cooldown is None:
-            return False
-
-        if not self.chat_history.can_reply(chat_id, now, cooldown):
-            return False
-
-        if not addressed:
-            if not self.chat_participation.passes_passive_reply_filters(
-                recent_unique_users=self.invite_service.recent_unique_user_count(chat_id, 180),
-                recent_messages=self.invite_service.recent_message_count(chat_id, 180),
-                text=text,
-                random_value=random.random(),
-            ):
-                return False
-
-        reply = await self.chat_agent_service.generate_reply(
+        decision = self.participation_decision.decide(
             chat_id=chat_id,
-            chat_title=chat_title,
             user_id=user_id,
-            username=username,
-            text=text,
-            history=self.chat_history.get_history(chat_id),
+            addressed=addressing,
             quiz_active=quiz_active,
-            current_question_text=current_question_text,
-            addressed=addressed,
+            recent_messages=recent_messages,
+            recent_unique_users=recent_unique_users,
+            tension_level=tension_level,
         )
+        if not decision.should_reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='decision_suppressed',
+                    reason_codes=decision.reason_codes,
+                    mode=decision.mode,
+                    message_id=message_id,
+                )
+            )
+            logger.debug('Alisa silence chat_id=%s user_id=%s reasons=%s', chat_id, user_id, decision.reason_codes)
+            return False
+
+        mode = decision.mode
+        if mode == 'addressed_reply':
+            mode = self.persona_policy.choose_mode(text=text, addressed_by=addressing.addressed_by, quiz_active=quiz_active)
+        now = time.time()
+        if decision.cooldown_sec is not None and not self.chat_history.can_reply(chat_id, now, decision.cooldown_sec):
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='history_cooldown_suppressed',
+                    reason_codes=['suppressed_history_cooldown'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
+            logger.debug('Alisa suppressed by history cooldown chat_id=%s', chat_id)
+            return False
+
+        try:
+            reply = await asyncio.wait_for(
+                self.chat_agent_service.generate_reply(
+                    chat_id=chat_id,
+                    chat_title=chat_title,
+                    user_id=user_id,
+                    username=username,
+                    text=text,
+                    history=self.chat_history.get_history(chat_id),
+                    quiz_active=quiz_active,
+                    current_question_text=current_question_text,
+                    addressed=addressed,
+                    mode=mode,
+                ),
+                timeout=max(1.0, float(settings.alisa_generation_timeout_seconds)),
+            )
+        except asyncio.TimeoutError:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='provider_timeout',
+                    reason_codes=['suppressed_provider_timeout'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
+            logger.warning('Alisa provider timeout chat_id=%s user_id=%s mode=%s', chat_id, user_id, mode)
+            return False
         if not reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='provider_empty_reply',
+                    reason_codes=['suppressed_empty_provider_reply'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
+            return False
+
+        recent_assistant_texts = [
+            item.get('text', '')
+            for item in self.chat_history.get_history(chat_id)
+            if item.get('role') == 'assistant'
+        ]
+        validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
+            text=reply,
+            mode=mode,
+            quiz_active=quiz_active,
+            recent_assistant_texts=recent_assistant_texts,
+        )
+        if not validated_reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='validator_suppressed',
+                    reason_codes=validation_reasons,
+                    mode=mode,
+                    rewritten=rewritten,
+                    message_id=message_id,
+                )
+            )
+            logger.debug(
+                'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
+                chat_id,
+                user_id,
+                validation_reasons,
+            )
             return False
 
         self.chat_history.mark_reply(chat_id, now)
-        self.chat_history.remember_message(chat_id, 'assistant', 'quiz_bot', reply)
-        await bot.send_message(chat_id, reply)
+        if decision.mode == 'initiative_topic_drop':
+            self.participation_decision.mark_initiative(chat_id, user_id)
+        else:
+            self.participation_decision.mark_replied(chat_id)
+        self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
+        self.chat_history.remember_message(
+            chat_id,
+            'assistant',
+            settings.alisa_name,
+            validated_reply,
+            author_id=bot.id,
+            addressed_to_alisa=False,
+        )
+        try:
+            await safe_bot_send_message(bot, chat_id, validated_reply)
+        except Exception as exc:  # noqa: BLE001
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='send_message_failed',
+                    reason_codes=['suppressed_telegram_send_error'],
+                    mode=mode,
+                    rewritten=rewritten,
+                    message_id=message_id,
+                    extra={'error': str(exc)},
+                )
+            )
+            logger.warning('Alisa send_message failed chat_id=%s user_id=%s: %s', chat_id, user_id, exc)
+            return False
+        self.decision_audit.record(
+            DecisionAuditEvent(
+                chat_id=chat_id,
+                user_id=user_id,
+                stage='reply_sent',
+                reason_codes=[*decision.reason_codes, *validation_reasons],
+                mode=mode,
+                rewritten=rewritten,
+                message_id=message_id,
+                extra={'addressed_by': addressing.addressed_by},
+            )
+        )
+        logger.debug(
+            'Alisa replied chat_id=%s user_id=%s mode=%s addressed_by=%s decision_reasons=%s validation_reasons=%s rewritten=%s',
+            chat_id,
+            user_id,
+            mode,
+            addressing.addressed_by,
+            decision.reason_codes,
+            validation_reasons,
+            rewritten,
+        )
         return True
 
     async def give_hint(self, bot: Bot, chat_id: int) -> str:

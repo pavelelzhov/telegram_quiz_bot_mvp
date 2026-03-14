@@ -5,28 +5,9 @@ import logging
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.core.alisa_policy import PersonaPolicyService
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """
-Ты — умный, живой и немного ироничный участник Telegram-чата.
-Ты не канцелярский помощник, а нормальный собеседник с характером.
-
-Режимы:
-- chat: обычный разговор, коротко, живо, местами с юмором
-- support: мягкая поддержка, тепло, спокойно, без диагнозов и без пафоса
-- roast: лёгкий дружеский roast, без жести, без унижения, без токсичных оскорблений
-- quiz_active: если в чате идёт квиз, не раскрывай правильный ответ напрямую
-
-Правила:
-- всегда по-русски
-- 1-4 коротких предложения
-- не пиши простыни
-- не говори, что ты ИИ, модель, ассистент
-- не раскрывай ответ активного вопроса квиза
-- если человек явно просит инфу из сети, этим занимается другой инструмент, не выдумывай факты
-- если речь о поддержке, будь человеком, а не лекцией
-""".strip()
 
 
 class AgentReplyProvider:
@@ -36,6 +17,21 @@ class AgentReplyProvider:
             base_url=settings.openai_base_url,
         )
         self.model = settings.openai_model
+
+
+    def resolve_temperature(self, *, mode: str, sharpness_ceiling: str) -> float:
+        if mode in ('quiz_safe_mode', 'warm_support'):
+            return 0.45
+        if mode in ('micro_reaction', 'initiative_topic_drop'):
+            return 0.75
+        if mode == 'pushback':
+            return 0.65
+
+        if sharpness_ceiling == 'low':
+            return 0.5
+        if sharpness_ceiling == 'high':
+            return 0.9
+        return 0.8
 
     async def generate_reply(
         self,
@@ -48,12 +44,14 @@ class AgentReplyProvider:
         addressed: bool,
         user_memory: str,
         chat_memory: str,
-        mode: str = 'chat',
+        mode: str = 'addressed_reply',
+        relationship_hint: str = '',
+        sharpness_ceiling: str = 'medium',
     ) -> str:
         history_lines: list[str] = []
         for item in history[-12:]:
             history_lines.append(
-                f"{item.get('role','user')}:{item.get('speaker','someone')}: {item.get('text','')}"
+                f"{item.get('role', 'user')}:{item.get('speaker', 'someone')}: {item.get('text', '')}"
             )
 
         history_text = '\n'.join(history_lines) if history_lines else 'контекст пуст'
@@ -61,35 +59,43 @@ class AgentReplyProvider:
         if quiz_active:
             quiz_block = f'Квиз активен. Текущий вопрос: {current_question_text or "вопрос скрыт"}'
 
+        mode_prompt = PersonaPolicyService.MODE_PROMPTS.get(mode, PersonaPolicyService.MODE_PROMPTS['addressed_reply'])
+
         prompt = f"""
+[MODE]
+{mode}
+
+[MODE_INSTRUCTIONS]
+{mode_prompt}
+
+[RELATIONSHIP_CONTEXT]
+{relationship_hint or 'Пока нейтральный контакт.'}
+
+[CONVERSATION_CONTEXT]
 Чат: {chat_title}
-Режим ответа: {mode}
 Пользователь: @{username}
-Обращение к тебе: {"да" if addressed else "нет"}
-
-Память о пользователе:
-{user_memory}
-
-Память о чате:
-{chat_memory}
-
-Контекст недавнего диалога:
+Обращение к Алисе: {'да' if addressed else 'нет'}
+Память о пользователе: {user_memory}
+Память о чате: {chat_memory}
+Недавний контекст:
 {history_text}
 
-Новое сообщение:
-{user_text}
-
+[QUIZ_SAFETY]
 {quiz_block}
 
-Сформируй уместный короткий ответ.
+[STYLE_TARGET]
+Макс длина: коротко. Резкость: {sharpness_ceiling}.
+
+[INPUT_MESSAGE]
+{user_text}
 """.strip()
 
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                temperature=0.8,
+                temperature=self.resolve_temperature(mode=mode, sharpness_ceiling=sharpness_ceiling),
                 messages=[
-                    {'role': 'system', 'content': SYSTEM_PROMPT},
+                    {'role': 'system', 'content': PersonaPolicyService.PERSONA_CORE_PROMPT},
                     {'role': 'user', 'content': prompt},
                 ],
             )

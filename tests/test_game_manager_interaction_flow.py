@@ -91,6 +91,34 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(state.current_question.question, first_question_text)
             self.assertGreaterEqual(len(state.scores), 1)
 
+    async def test_three_unique_wrong_answers_force_next_question(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
+            db = Database(tmp.name)
+            await db.init()
+            manager = GameManager(db=db, question_provider=_BatchProvider())
+            bot = _DummyBot()
+
+            start_result = await manager.start_game(
+                bot=bot,
+                chat_id=124,
+                started_by_user_id=777,
+                question_limit=3,
+                quiz_mode='classic',
+            )
+            self.assertEqual(start_result, 'OK')
+
+            state = manager.get_game(124)
+            assert state is not None
+            first_question_text = state.current_question.question if state.current_question else ''
+
+            await manager.handle_answer(bot=bot, chat_id=124, user_id=1, username='u1', text='неверно')
+            await manager.handle_answer(bot=bot, chat_id=124, user_id=2, username='u2', text='неверно')
+            await manager.handle_answer(bot=bot, chat_id=124, user_id=3, username='u3', text='неверно')
+
+            self.assertEqual(state.asked_count, 2)
+            self.assertIsNotNone(state.current_question)
+            self.assertNotEqual(state.current_question.question, first_question_text)
+
 
 if __name__ == '__main__':
     unittest.main()

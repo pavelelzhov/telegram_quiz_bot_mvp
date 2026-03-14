@@ -285,6 +285,12 @@ class GameManager:
                 response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
                 await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
                 await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
+                if len(state.wrong_reply_user_ids) >= 3:
+                    self._cancel_question_task(chat_id)
+                    state.last_correct_user_id = None
+                    state.correct_streak_count = 0
+                    await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
+                    await self._ask_next_question(bot, chat_id)
             return False
 
         if verdict == 'close':

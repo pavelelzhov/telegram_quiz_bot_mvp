@@ -19,6 +19,7 @@ from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.relationship_profile_service import RelationshipProfileService
+from app.core.decision_audit_service import DecisionAuditEvent, DecisionAuditService
 from app.core.alisa_policy import (
     AddressingPolicyService,
     ParticipationDecisionService,
@@ -61,6 +62,7 @@ class GameManager:
         self.participation_decision = ParticipationDecisionService()
         self.persona_policy = PersonaPolicyService()
         self.reply_validator = ReplyValidationService()
+        self.decision_audit = DecisionAuditService()
         self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
@@ -409,6 +411,8 @@ class GameManager:
         if not cfg.chat_mode_enabled:
             return False
 
+        message_id = None
+
         addressing = self.addressing_policy.evaluate(
             text=text,
             is_reply_to_alisa=is_reply_to_alisa,
@@ -473,6 +477,16 @@ class GameManager:
             tension_level=tension_level,
         )
         if not decision.should_reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='decision_suppressed',
+                    reason_codes=decision.reason_codes,
+                    mode=decision.mode,
+                    message_id=message_id,
+                )
+            )
             logger.debug('Alisa silence chat_id=%s user_id=%s reasons=%s', chat_id, user_id, decision.reason_codes)
             return False
 
@@ -481,6 +495,16 @@ class GameManager:
             mode = self.persona_policy.choose_mode(text=text, addressed_by=addressing.addressed_by, quiz_active=quiz_active)
         now = time.time()
         if decision.cooldown_sec is not None and not self.chat_history.can_reply(chat_id, now, decision.cooldown_sec):
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='history_cooldown_suppressed',
+                    reason_codes=['suppressed_history_cooldown'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
             logger.debug('Alisa suppressed by history cooldown chat_id=%s', chat_id)
             return False
 
@@ -497,6 +521,41 @@ class GameManager:
             mode=mode,
         )
         if not reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='provider_empty_reply',
+                    reason_codes=['suppressed_empty_provider_reply'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
+            return False
+
+        validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
+            text=reply,
+            mode=mode,
+            quiz_active=quiz_active,
+        )
+        if not validated_reply:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='validator_suppressed',
+                    reason_codes=validation_reasons,
+                    mode=mode,
+                    rewritten=rewritten,
+                    message_id=message_id,
+                )
+            )
+            logger.debug(
+                'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
+                chat_id,
+                user_id,
+                validation_reasons,
+            )
             return False
 
         validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
@@ -528,6 +587,18 @@ class GameManager:
             addressed_to_alisa=False,
         )
         await bot.send_message(chat_id, validated_reply)
+        self.decision_audit.record(
+            DecisionAuditEvent(
+                chat_id=chat_id,
+                user_id=user_id,
+                stage='reply_sent',
+                reason_codes=[*decision.reason_codes, *validation_reasons],
+                mode=mode,
+                rewritten=rewritten,
+                message_id=message_id,
+                extra={'addressed_by': addressing.addressed_by},
+            )
+        )
         logger.debug(
             'Alisa replied chat_id=%s user_id=%s mode=%s addressed_by=%s decision_reasons=%s validation_reasons=%s rewritten=%s',
             chat_id,

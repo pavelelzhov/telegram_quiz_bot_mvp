@@ -6,6 +6,7 @@ import unittest
 from app.core.alisa_policy import (
     AddressingPolicyService,
     AddressingDecision,
+    InitiativeService,
     ParticipationDecisionService,
     ReplyValidationService,
 )
@@ -107,6 +108,24 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         self.assertEqual(decision.mode, 'initiative_topic_drop')
 
 
+
+
+class InitiativeServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.service = InitiativeService()
+
+    def test_initiative_suppressed_on_low_activity(self) -> None:
+        decision = self.service.can_start(
+            chat_id=1,
+            recent_messages=0,
+            recent_unique_users=0,
+            tension_level=0.0,
+            now_ts=time.time(),
+        )
+        self.assertFalse(decision.should_reply)
+        self.assertIn('suppressed_low_activity', decision.reason_codes)
+
+
 class ReplyValidationServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = ReplyValidationService()
@@ -117,8 +136,10 @@ class ReplyValidationServiceTests(unittest.TestCase):
             mode='addressed_reply',
             quiz_active=False,
         )
-        self.assertEqual(text, '')
-        self.assertIn('suppressed_ai_phrase', reasons)
+        self.assertNotEqual(text, '')
+        self.assertIn('rewritten_ai_phrase', reasons)
+        self.assertNotIn('suppressed_ai_phrase', reasons)
+        self.assertTrue(text)
 
     def test_length_clamp(self) -> None:
         candidate = 'Очень длинный ответ. ' * 30

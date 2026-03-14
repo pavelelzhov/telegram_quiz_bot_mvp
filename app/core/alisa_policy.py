@@ -134,12 +134,58 @@ class PersonaPolicyService:
         return 'observed_silence'
 
 
+class InitiativeService:
+    def __init__(self) -> None:
+        self.last_initiative_ts: dict[int, float] = {}
+        self.initiative_budget_by_day: dict[tuple[int, str], int] = {}
+
+    def can_start(
+        self,
+        *,
+        chat_id: int,
+        recent_messages: int,
+        recent_unique_users: int,
+        tension_level: float,
+        now_ts: float,
+    ) -> ParticipationDecision:
+        if not settings.alisa_initiative_enabled:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_initiative_disabled'], False, None)
+
+        if recent_messages < settings.alisa_min_messages_window_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_activity'], False, None)
+
+        if recent_unique_users < settings.alisa_min_unique_users_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_unique_users'], False, None)
+
+        if tension_level > settings.alisa_max_recent_tension_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_high_tension'], False, None)
+
+        min_between = float(settings.alisa_min_minutes_between_initiatives * 60)
+        last_initiative = self.last_initiative_ts.get(chat_id, 0.0)
+        if now_ts - last_initiative < min_between:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], False, min_between)
+
+        day_key = datetime.now(timezone.utc).date().isoformat()
+        budget_key = (chat_id, day_key)
+        used = self.initiative_budget_by_day.get(budget_key, 0)
+        if used >= settings.alisa_max_initiatives_per_day:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_initiative_budget'], False, None)
+
+        return ParticipationDecision(True, 'initiative_topic_drop', ['passive_initiative_allowed'], False, None)
+
+    def mark(self, chat_id: int) -> None:
+        now = time.time()
+        self.last_initiative_ts[chat_id] = now
+        day_key = datetime.now(timezone.utc).date().isoformat()
+        budget_key = (chat_id, day_key)
+        self.initiative_budget_by_day[budget_key] = self.initiative_budget_by_day.get(budget_key, 0) + 1
+
+
 class ParticipationDecisionService:
     def __init__(self) -> None:
         self.last_reply_ts: dict[int, float] = {}
         self.last_addressed_user_ts: dict[tuple[int, int], float] = {}
-        self.last_initiative_ts: dict[int, float] = {}
-        self.initiative_budget_by_day: dict[tuple[int, str], int] = {}
+        self.initiative_service = InitiativeService()
 
     def decide(
         self,
@@ -183,30 +229,13 @@ class ParticipationDecisionService:
                 cooldown,
             )
 
-        if not settings.alisa_initiative_enabled:
-            return ParticipationDecision(False, 'observed_silence', addressed.reason_codes, False, None)
-
-        if recent_messages < settings.alisa_min_messages_window_for_initiative:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_activity'], False, None)
-
-        if recent_unique_users < settings.alisa_min_unique_users_for_initiative:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_unique_users'], False, None)
-
-        if tension_level > settings.alisa_max_recent_tension_for_initiative:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_high_tension'], False, None)
-
-        min_between = float(settings.alisa_min_minutes_between_initiatives * 60)
-        last_initiative = self.last_initiative_ts.get(chat_id, 0.0)
-        if now - last_initiative < min_between:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], False, min_between)
-
-        day_key = datetime.now(timezone.utc).date().isoformat()
-        budget_key = (chat_id, day_key)
-        used = self.initiative_budget_by_day.get(budget_key, 0)
-        if used >= settings.alisa_max_initiatives_per_day:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_initiative_budget'], False, None)
-
-        return ParticipationDecision(True, 'initiative_topic_drop', ['passive_initiative_allowed'], False, None)
+        return self.initiative_service.can_start(
+            chat_id=chat_id,
+            recent_messages=recent_messages,
+            recent_unique_users=recent_unique_users,
+            tension_level=tension_level,
+            now_ts=now,
+        )
 
     def mark_replied(self, chat_id: int) -> None:
         self.last_reply_ts[chat_id] = time.time()
@@ -214,10 +243,7 @@ class ParticipationDecisionService:
     def mark_initiative(self, chat_id: int) -> None:
         now = time.time()
         self.last_reply_ts[chat_id] = now
-        self.last_initiative_ts[chat_id] = now
-        day_key = datetime.now(timezone.utc).date().isoformat()
-        budget_key = (chat_id, day_key)
-        self.initiative_budget_by_day[budget_key] = self.initiative_budget_by_day.get(budget_key, 0) + 1
+        self.initiative_service.mark(chat_id)
 
 
 class ReplyValidationService:
@@ -226,15 +252,18 @@ class ReplyValidationService:
         if not value:
             return '', ['suppressed_empty_reply'], False
 
-        lowered = value.lower()
         reasons: list[str] = []
         rewritten = False
 
         if settings.alisa_ai_phrase_filter:
-            for pattern in PersonaPolicyService.BANNED_PATTERNS:
-                if pattern in lowered:
-                    reasons.append('suppressed_ai_phrase')
-                    return '', reasons, False
+            rewritten_value = self._rewrite_ai_style(value)
+            if rewritten_value != value:
+                reasons.append('rewritten_ai_phrase')
+                rewritten = True
+                value = rewritten_value
+            if self._contains_banned_pattern(value):
+                reasons.append('suppressed_ai_phrase')
+                return '', reasons, rewritten
 
         max_chars = settings.alisa_support_max_chars if mode == 'warm_support' else settings.alisa_reply_max_chars
         if len(value) > max_chars:
@@ -249,7 +278,27 @@ class ReplyValidationService:
             reasons.append('clamped_max_sentences')
             rewritten = True
 
+        lowered = value.lower()
         if quiz_active and any(token in lowered for token in ('правильный ответ', 'ответ:', 'это точно')):
             return 'Я тебе сейчас не помощница. Играй честно.', ['suppressed_quiz_spoiler_risk', 'safe_rewrite'], True
 
         return value, reasons, rewritten
+
+    def _contains_banned_pattern(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(pattern in lowered for pattern in PersonaPolicyService.BANNED_PATTERNS)
+
+    def _rewrite_ai_style(self, text: str) -> str:
+        rewritten = text
+        replacements = {
+            r'(?i)как\s+ии[,\s]*': '',
+            r'(?i)как\s+языковая\s+модель[,\s]*': '',
+            r'(?i)я\s+не\s+могу\s+испытывать\s+эмоции[.!?]*': 'Я могу ошибаться, но скажу прямо.',
+            r'(?i)чем\s+могу\s+помочь\??': 'Что именно нужно?',
+            r'(?i)если\s+хочешь,\s*я\s+могу': 'Могу',
+        }
+        for pattern, repl in replacements.items():
+            rewritten = re.sub(pattern, repl, rewritten)
+
+        rewritten = re.sub(r'\s{2,}', ' ', rewritten).strip(' ,')
+        return rewritten

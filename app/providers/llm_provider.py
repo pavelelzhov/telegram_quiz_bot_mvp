@@ -12,7 +12,7 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.core.models import QuizQuestion
+from app.core.models import QuestionCandidate, QuizQuestion
 from app.quiz.history_store import QuizHistoryStore
 from app.utils.ops_log import log_operation
 from app.utils.retry import retry_async
@@ -761,3 +761,68 @@ class LLMQuestionProvider:
             status = getattr(exc, 'status_code', None)
             return bool(status in {429} or (isinstance(status, int) and status >= 500))
         return False
+
+
+    async def generate_question_batch(self, request: dict[str, Any]) -> list[QuestionCandidate]:
+        count = int(request.get('count', 10))
+        category = str(request.get('category', CATEGORY_RANDOM))
+        difficulty = str(request.get('difficulty', 'medium'))
+        mode = str(request.get('mode', 'classic'))
+        batch: list[QuestionCandidate] = []
+        for _ in range(max(1, min(count, 20))):
+            question = await self.generate_question(
+                chat_id=int(request.get('chat_id', 0)),
+                used_keys=set(),
+                preferred_category=category,
+                stage='core',
+                preferred_difficulty=difficulty,
+            )
+            candidate = QuestionCandidate(
+                provider_name='openai',
+                model_name=self.model,
+                language=str(request.get('language', 'ru')),
+                topic=question.topic or category,
+                subtopic='',
+                difficulty=question.difficulty,
+                question_type=question.question_type,
+                question_text=question.question,
+                options=[],
+                correct_answer_text=question.answer,
+                explanation=question.explanation,
+                canonical_facts=[question.explanation, question.answer],
+                uniqueness_tags=[question.topic or category],
+                created_for_mode=mode,
+                raw_payload={'hint': question.hint, 'aliases': question.aliases},
+            )
+            batch.append(candidate)
+        return self.validate_question_batch(batch)
+
+    def validate_question_batch(self, candidates: list[QuestionCandidate]) -> list[QuestionCandidate]:
+        valid: list[QuestionCandidate] = []
+        for candidate in candidates:
+            if not candidate.question_text or len(candidate.question_text.strip()) < 8:
+                continue
+            if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+                continue
+            if not candidate.correct_answer_text.strip() or not candidate.explanation.strip():
+                continue
+            valid.append(candidate)
+        return valid
+
+    def repair_invalid_question(self, candidate: QuestionCandidate) -> QuestionCandidate | None:
+        if not candidate.question_text.strip() or not candidate.correct_answer_text.strip():
+            return None
+        if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+            candidate.difficulty = 'medium'
+        if not candidate.explanation.strip():
+            candidate.explanation = 'Короткое объяснение недоступно.'
+        return candidate
+
+    def derive_uniqueness_fingerprint(self, candidate: QuestionCandidate) -> dict[str, Any]:
+        canonical_facts = [str(item).strip().lower() for item in candidate.canonical_facts if str(item).strip()]
+        return {
+            'topic': (candidate.topic or '').strip().lower(),
+            'subtopic': (candidate.subtopic or '').strip().lower(),
+            'canonical_facts': canonical_facts,
+            'answer_normalized': (candidate.correct_answer_text or '').strip().lower(),
+        }

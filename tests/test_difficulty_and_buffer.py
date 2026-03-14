@@ -4,9 +4,10 @@ import asyncio
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from app.core.difficulty_service import DifficultyService
-from app.core.models import GameState, PlayerSkillSnapshot, QuestionCandidate
+from app.core.models import GameState, PlayerSkillSnapshot, QuestionCandidate, QuestionUsageRecord
 from app.core.quiz_engine_service import QuizEngineService
 from app.storage.db import Database
 
@@ -249,6 +250,65 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 await engine.ensure_minimum_buffer(state, target_difficulty='medium')
                 answers = [item.answer for item in state.question_buffer]
                 self.assertEqual(answers.count('Берлин'), 1)
+            finally:
+                os.remove(path)
+
+        asyncio.run(_run())
+
+    def test_buffer_relaxes_repeat_policy_when_cache_exists_but_strict_filters_exhausted(self) -> None:
+        async def _run() -> None:
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = Database(path)
+                await db.init()
+                engine = QuizEngineService(db=db, llm_provider=None)
+                state = GameState(chat_id=44, started_by_user_id=1, question_limit=5)
+
+                await db.save_generated_questions(
+                    [
+                        QuestionCandidate(
+                            provider_name='openai',
+                            model_name='gpt-test',
+                            language='ru',
+                            topic='География',
+                            subtopic='',
+                            difficulty='medium',
+                            question_type='text',
+                            question_text='Столица Испании?',
+                            correct_answer_text='Мадрид',
+                            explanation='Столица Испании — Мадрид.',
+                            canonical_facts=['Испания', 'Мадрид'],
+                            uniqueness_tags=['geo'],
+                            question_hash='relax-qh-1',
+                            uniqueness_hash='relax-uh-1',
+                        )
+                    ]
+                )
+
+                candidates = await db.get_candidate_questions(
+                    difficulty='medium',
+                    limit=5,
+                    mode='classic',
+                    chat_id=44,
+                    local_game_date=datetime.now(timezone.utc).date().isoformat(),
+                    repeat_window_days=5,
+                    same_day_repeat_block_enabled=True,
+                )
+                self.assertEqual(len(candidates), 1)
+                await db.log_question_usage(
+                    QuestionUsageRecord(
+                        question_id=int(candidates[0]['id']),
+                        chat_id=44,
+                        shown_at=datetime.now(timezone.utc).isoformat(),
+                        local_game_date=datetime.now(timezone.utc).date().isoformat(),
+                    )
+                )
+
+                await engine.ensure_minimum_buffer(state, target_difficulty='medium')
+
+                self.assertGreaterEqual(len(state.question_buffer), 1)
+                self.assertEqual(state.question_buffer[0].answer, 'Мадрид')
             finally:
                 os.remove(path)
 

@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 class QuizEngineService:
-    TARGET_CACHE_SIZE = 500
-    LOW_WATERMARK_CACHE_SIZE = 300
+    TARGET_CACHE_SIZE = 10000
+    LOW_WATERMARK_CACHE_SIZE = 8000
+    MIN_START_CACHE_SIZE = 7000
     GENERATION_BATCH_SIZE = 50
 
     def __init__(self, db=None, llm_provider=None, dedup_service: Optional[QuestionDedupService] = None) -> None:
@@ -500,7 +501,7 @@ class QuizEngineService:
         progress = min(100, int((cache_size / max(1, self.TARGET_CACHE_SIZE)) * 100))
         refill_state = 'идёт' if inflight else 'не идёт'
         threshold_hint = (
-            'автопополнение включится при падении ниже 300'
+            f'автопополнение включится при падении ниже {self.LOW_WATERMARK_CACHE_SIZE}'
             if cache_size >= self.LOW_WATERMARK_CACHE_SIZE
             else 'ниже порога, пополнение должно быть активным'
         )

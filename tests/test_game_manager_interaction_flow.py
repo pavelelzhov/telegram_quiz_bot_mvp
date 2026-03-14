@@ -60,6 +60,7 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
 
     def _build_manager(self, db: Database) -> GameManager:
         manager = GameManager(db=db, question_provider=_BatchProvider())
+        manager.quiz_engine.MIN_START_CACHE_SIZE = 0
 
         async def _noop_refill(*_args, **_kwargs):
             return None

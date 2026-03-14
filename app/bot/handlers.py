@@ -590,9 +590,14 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('quiz_repeat_rules'))
     async def cmd_quiz_repeat_rules(message: Message, command: CommandObject) -> None:
         days = 5
-        if command.args:
+        raw_args = (command.args or '').strip()
+        if not raw_args and message.text:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                raw_args = parts[1].strip()
+        if raw_args:
             try:
-                days = int(command.args.strip())
+                days = int(raw_args)
             except ValueError:
                 days = 5
         game_manager.chat_config.set_repeat_rules(message.chat.id, days, True)

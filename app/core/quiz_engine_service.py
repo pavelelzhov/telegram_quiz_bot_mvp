@@ -1,9 +1,26 @@
 from __future__ import annotations
 
-from app.core.models import ChatSettings, GameState, QuizQuestion
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from app.core.models import (
+    ChatSettings,
+    GameState,
+    QuestionSelectionContext,
+    QuizQuestion,
+)
+from app.core.question_dedup_service import QuestionDedupService
+
+logger = logging.getLogger(__name__)
 
 
 class QuizEngineService:
+    def __init__(self, db=None, llm_provider=None, dedup_service: Optional[QuestionDedupService] = None) -> None:
+        self.db = db
+        self.llm_provider = llm_provider
+        self.dedup_service = dedup_service or QuestionDedupService()
+
     def game_profile_label(self, profile: str) -> str:
         mapping = {
             'casual': '😌 casual',
@@ -18,6 +35,8 @@ class QuizEngineService:
             'blitz': '🔥 Блиц',
             'epic': '👑 Эпик',
             'team2v2': '🤝 Командный 2v2',
+            'solo_adaptive': '🧠 Solo Adaptive',
+            'daily': '📅 Daily Challenge',
         }
         return mapping.get(quiz_mode, '🎯 Классика')
 
@@ -93,3 +112,120 @@ class QuizEngineService:
             question.round_label = '⚡ Блиц-раунд'
         if state.quiz_mode == 'epic' and stage == 'core':
             question.round_label = '🧩 Эпик-раунд'
+
+    async def prepare_question_buffer(self, game_state: GameState, participants: list[int]) -> None:
+        if len(game_state.question_buffer) >= 5:
+            return
+        await self.ensure_minimum_buffer(game_state)
+
+    async def ensure_minimum_buffer(self, game_state: GameState) -> None:
+        if self.db is None:
+            return
+        needed = max(0, 10 - len(game_state.question_buffer))
+        if needed == 0:
+            return
+
+        target_difficulty = 'medium'
+        candidates = await self.db.get_candidate_questions(
+            difficulty=target_difficulty,
+            limit=max(needed, 5),
+            topic=game_state.topic_focus[0] if game_state.topic_focus else None,
+            mode=game_state.quiz_mode,
+        )
+        selection_context = QuestionSelectionContext(
+            chat_id=game_state.chat_id,
+            local_game_date=game_state.local_game_date or datetime.now(timezone.utc).date().isoformat(),
+            topic_focus=game_state.topic_focus,
+            target_difficulty=target_difficulty,
+        )
+        setattr(selection_context, 'question_ids_used_in_game', game_state.question_ids_used_in_game)
+        setattr(selection_context, 'uniqueness_hashes_used_in_game', game_state.uniqueness_hashes_used_in_game)
+        filtered = await self.filter_repeated_questions(candidates, selection_context)
+        filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
+        for item in filtered[:needed]:
+            game_state.question_buffer.append(
+                QuizQuestion(
+                    category=item.get('topic') or 'Общие знания',
+                    difficulty=item['difficulty'],
+                    topic=item.get('topic') or '',
+                    question=item['question_text'],
+                    answer=item['correct_answer_text'],
+                    aliases=[],
+                    hint='Подумай о главном факте вопроса.',
+                    explanation=item['explanation'],
+                    question_type=item['question_type'],
+                    source='llm_cache',
+                    question_id=item['id'],
+                    question_hash=item.get('question_hash', ''),
+                    uniqueness_hash=item.get('uniqueness_hash', ''),
+                    quality_score=float(item.get('quality_score') or 0),
+                )
+            )
+
+        await self.request_generation_if_buffer_low(game_state)
+
+    async def select_next_question(self, game_state: GameState, player_id: int | None = None) -> QuizQuestion | None:
+        if not game_state.question_buffer:
+            await self.ensure_minimum_buffer(game_state)
+        if not game_state.question_buffer:
+            return None
+        return game_state.question_buffer.pop(0)
+
+    async def request_generation_if_buffer_low(self, game_state: GameState) -> None:
+        if len(game_state.question_buffer) >= 3 or game_state.generation_inflight:
+            return
+        if self.llm_provider is None or self.db is None:
+            return
+        game_state.generation_inflight = True
+        try:
+            batch = await self.llm_provider.generate_question_batch(
+                {
+                    'chat_id': game_state.chat_id,
+                    'count': 10,
+                    'difficulty': 'medium',
+                    'mode': game_state.quiz_mode,
+                }
+            )
+            await self.db.save_generated_questions(batch)
+        except Exception:
+            logger.exception('Не удалось догенерировать пакет вопросов для буфера')
+        finally:
+            game_state.generation_inflight = False
+
+    async def filter_repeated_questions(self, candidates: list[dict], context: QuestionSelectionContext) -> list[dict]:
+        if self.db is None:
+            return candidates
+        chat_usage = await self.db.get_recent_question_usage_for_chat(context.chat_id, days=context.repeat_window_days)
+        player_usage = []
+        if context.player_id is not None:
+            player_usage = await self.db.get_recent_question_usage_for_player(context.player_id, days=context.repeat_window_days)
+
+        chat_qids_today = {
+            int(item['question_id'])
+            for item in chat_usage
+            if item.get('local_game_date') == context.local_game_date
+        }
+        chat_seen_uniqueness = {str(item.get('uniqueness_hash', '')) for item in chat_usage if item.get('uniqueness_hash')}
+        player_seen_uniqueness = {str(item.get('uniqueness_hash', '')) for item in player_usage if item.get('uniqueness_hash')}
+
+        filtered = []
+        for candidate in candidates:
+            candidate_id = int(candidate['id'])
+            if context.same_day_repeat_block_enabled and candidate_id in chat_qids_today:
+                continue
+            if candidate_id in getattr(context, 'question_ids_used_in_game', set()):
+                continue
+            uq = str(candidate.get('uniqueness_hash', ''))
+            if uq and (uq in chat_seen_uniqueness or uq in player_seen_uniqueness):
+                continue
+            if uq and uq in getattr(context, 'uniqueness_hashes_used_in_game', set()):
+                continue
+            filtered.append(candidate)
+        return filtered
+
+    def score_candidate_fit(self, candidate: dict, context: QuestionSelectionContext) -> float:
+        quality = float(candidate.get('quality_score') or 0)
+        difficulty = candidate.get('difficulty', 'medium')
+        diff_bonus = 1.0 if difficulty == context.target_difficulty else 0.2
+        topic_bonus = 0.3 if not context.topic_focus or candidate.get('topic') in context.topic_focus else 0.0
+        return quality + diff_bonus + topic_bonus

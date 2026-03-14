@@ -160,6 +160,27 @@ class QuizEngineService:
         if needed == 0:
             return
 
+        appended = await self._append_candidates_to_buffer(game_state, target_difficulty=target_difficulty, needed=needed)
+
+        await self.request_generation_if_buffer_low(game_state)
+
+        if appended == 0 and len(game_state.question_buffer) < 5:
+            post_generation_needed = max(0, 10 - len(game_state.question_buffer))
+            if post_generation_needed > 0:
+                difficulty_fallbacks = [target_difficulty, 'medium', 'easy', 'hard']
+                for difficulty in difficulty_fallbacks:
+                    added = await self._append_candidates_to_buffer(
+                        game_state,
+                        target_difficulty=difficulty,
+                        needed=post_generation_needed,
+                    )
+                    if added > 0:
+                        break
+
+    async def _append_candidates_to_buffer(self, game_state: GameState, target_difficulty: str, needed: int) -> int:
+        if self.db is None or needed <= 0:
+            return 0
+
         candidates = await self.db.get_candidate_questions(
             difficulty=target_difficulty,
             limit=max(needed, 5),
@@ -182,6 +203,7 @@ class QuizEngineService:
         )
         filtered = await self.filter_repeated_questions(candidates, selection_context)
         filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
+        appended = 0
         for item in filtered[:needed]:
             game_state.question_buffer.append(
                 QuizQuestion(
@@ -201,8 +223,9 @@ class QuizEngineService:
                     quality_score=float(item.get('quality_score') or 0),
                 )
             )
+            appended += 1
 
-        await self.request_generation_if_buffer_low(game_state)
+        return appended
 
     async def select_next_question(self, game_state: GameState, player_id: int | None = None) -> QuizQuestion | None:
         if not game_state.question_buffer:

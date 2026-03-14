@@ -156,6 +156,49 @@ class DifficultyAndBufferTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_ensure_minimum_buffer_refetches_after_generation_on_empty_cache(self) -> None:
+        class Provider:
+            async def generate_question_batch(self, request):
+                return [
+                    QuestionCandidate(
+                        provider_name='openai',
+                        model_name='gpt-test',
+                        language='ru',
+                        topic='География',
+                        subtopic='',
+                        difficulty='medium',
+                        question_type='text',
+                        question_text='Столица Германии?',
+                        correct_answer_text='Берлин',
+                        explanation='Столица Германии — Берлин.',
+                        canonical_facts=['Германия', 'Берлин'],
+                        uniqueness_tags=['география'],
+                        question_hash='cold-qh-1',
+                        uniqueness_hash='cold-uh-1',
+                    )
+                ]
+
+            def validate_question_batch(self, batch):
+                return batch
+
+        async def _run() -> None:
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = Database(path)
+                await db.init()
+                engine = QuizEngineService(db=db, llm_provider=Provider())
+                state = GameState(chat_id=12, started_by_user_id=1, question_limit=5)
+
+                await engine.ensure_minimum_buffer(state, target_difficulty='medium')
+
+                self.assertGreaterEqual(len(state.question_buffer), 1)
+                self.assertEqual(state.question_buffer[0].source, 'llm_cache')
+            finally:
+                os.remove(path)
+
+        asyncio.run(_run())
+
 
 if __name__ == '__main__':
     unittest.main()

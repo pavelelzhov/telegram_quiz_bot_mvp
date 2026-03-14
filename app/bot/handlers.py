@@ -532,10 +532,20 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('quiz_timezone'))
     async def cmd_quiz_timezone(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer('Использование: /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
+            await message.answer('Использование: /quiz_timezone UTC или /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
             return
-        game_manager.chat_config.set_timezone(message.chat.id, command.args.strip())
-        await message.answer(f'Таймзона обновлена: {command.args.strip()}', reply_markup=main_menu_kb())
+        requested_timezone = command.args.strip()
+        if game_manager.daily_challenge.is_timezone_supported(requested_timezone):
+            game_manager.chat_config.set_timezone(message.chat.id, requested_timezone)
+            await message.answer(f'Таймзона обновлена: {requested_timezone}', reply_markup=main_menu_kb())
+            return
+
+        game_manager.chat_config.set_timezone(message.chat.id, 'UTC')
+        await message.answer(
+            'Не удалось применить эту таймзону в текущем окружении. '
+            'Поставил UTC как универсальный fallback.',
+            reply_markup=main_menu_kb(),
+        )
 
     @router.message(Command('quiz_repeat_rules'))
     async def cmd_quiz_repeat_rules(message: Message, command: CommandObject) -> None:

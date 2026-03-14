@@ -65,7 +65,7 @@ class QuestionEnvelope:
 class QuestionSelectionContext:
     chat_id: int
     local_game_date: str
-    timezone: str = 'Europe/Berlin'
+    timezone: str = 'UTC'
     player_id: Optional[int] = None
     topic_focus: List[str] = field(default_factory=list)
     target_difficulty: str = 'medium'
@@ -126,7 +126,7 @@ class ChatSettings:
     admin_only_control: bool = False
     chat_mode_enabled: bool = True
     host_mode_enabled: bool = False
-    timezone: str = 'Europe/Berlin'
+    timezone: str = 'UTC'
     adaptive_mode_enabled: bool = True
     repeat_window_days: int = 5
     same_day_repeat_block_enabled: bool = True

@@ -26,6 +26,7 @@ class RoundLifecycleServiceTests(unittest.TestCase):
 
     def test_source_labels(self) -> None:
         self.assertEqual(self.service.source_label(self._question(source='llm')), 'ИИ')
+        self.assertEqual(self.service.source_label(self._question(source='llm_cache')), 'ИИ')
         self.assertEqual(self.service.source_label(self._question(source='image_pool')), 'картинка')
         self.assertEqual(self.service.source_label(self._question(source='music_pool')), 'музыка')
         self.assertEqual(self.service.source_label(self._question(source='fallback')), 'резерв')

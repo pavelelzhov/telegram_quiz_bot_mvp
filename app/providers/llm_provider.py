@@ -770,6 +770,7 @@ class LLMQuestionProvider:
         category = str(request.get('category', CATEGORY_RANDOM))
         difficulty = str(request.get('difficulty', 'medium'))
         mode = str(request.get('mode', 'classic'))
+        llm_only = bool(request.get('llm_only', False))
         batch: list[QuestionCandidate] = []
         for _ in range(max(1, min(count, 20))):
             question = await self.generate_question(
@@ -779,6 +780,10 @@ class LLMQuestionProvider:
                 stage='core',
                 preferred_difficulty=difficulty,
             )
+            if llm_only and question.source != 'llm':
+                logger.warning('Skip non-llm question in llm_only batch generation: source=%s', question.source)
+                continue
+
             candidate = QuestionCandidate(
                 provider_name='openai',
                 model_name=self.model,
@@ -794,7 +799,7 @@ class LLMQuestionProvider:
                 canonical_facts=[question.explanation, question.answer],
                 uniqueness_tags=[question.topic or category],
                 created_for_mode=mode,
-                raw_payload={'hint': question.hint, 'aliases': question.aliases},
+                raw_payload={'hint': question.hint, 'aliases': question.aliases, 'source': question.source},
             )
             batch.append(candidate)
         return self.validate_question_batch(batch)

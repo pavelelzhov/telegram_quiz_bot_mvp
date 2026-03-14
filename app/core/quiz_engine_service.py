@@ -218,6 +218,7 @@ class QuizEngineService:
                     'count': 10,
                     'difficulty': 'medium',
                     'mode': game_state.quiz_mode,
+                    'llm_only': True,
                 }
             )
             valid_batch = self.llm_provider.validate_question_batch(batch)

@@ -29,16 +29,18 @@ class LlmProviderBatchTests(unittest.TestCase):
                     )
                 )
 
-                batch = await LLMQuestionProvider.generate_question_batch(
-                    provider,
-                    {
-                        'chat_id': 1,
-                        'count': 3,
-                        'difficulty': 'medium',
-                        'llm_only': True,
-                    },
-                )
+                with patch('app.providers.llm_provider.logger.warning') as warning_mock:
+                    batch = await LLMQuestionProvider.generate_question_batch(
+                        provider,
+                        {
+                            'chat_id': 1,
+                            'count': 3,
+                            'difficulty': 'medium',
+                            'llm_only': True,
+                        },
+                    )
                 self.assertEqual(batch, [])
+                warning_mock.assert_called_once()
 
         asyncio.run(_run())
 

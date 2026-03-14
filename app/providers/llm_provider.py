@@ -772,6 +772,8 @@ class LLMQuestionProvider:
         mode = str(request.get('mode', 'classic'))
         llm_only = bool(request.get('llm_only', False))
         batch: list[QuestionCandidate] = []
+        skipped_non_llm = 0
+        skipped_sources: dict[str, int] = {}
         for _ in range(max(1, min(count, 20))):
             question = await self.generate_question(
                 chat_id=int(request.get('chat_id', 0)),
@@ -781,7 +783,9 @@ class LLMQuestionProvider:
                 preferred_difficulty=difficulty,
             )
             if llm_only and question.source != 'llm':
-                logger.warning('Skip non-llm question in llm_only batch generation: source=%s', question.source)
+                skipped_non_llm += 1
+                source = str(question.source or 'unknown')
+                skipped_sources[source] = skipped_sources.get(source, 0) + 1
                 continue
 
             candidate = QuestionCandidate(
@@ -802,6 +806,14 @@ class LLMQuestionProvider:
                 raw_payload={'hint': question.hint, 'aliases': question.aliases, 'source': question.source},
             )
             batch.append(candidate)
+
+        if llm_only and skipped_non_llm > 0:
+            logger.warning(
+                'Skip non-llm questions in llm_only batch generation: skipped=%s, sources=%s',
+                skipped_non_llm,
+                skipped_sources,
+            )
+
         return self.validate_question_batch(batch)
 
     def validate_question_batch(self, candidates: list[QuestionCandidate]) -> list[QuestionCandidate]:

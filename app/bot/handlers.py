@@ -381,26 +381,6 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def btn_control_menu(message: Message) -> None:
         await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
 
-    @router.message(F.text == '🏠 Главное меню')
-    async def btn_home_menu(message: Message) -> None:
-        await message.answer('Открываю главное меню.', reply_markup=main_menu_kb())
-
-    @router.message(F.text == '🎮 Игровое меню')
-    async def btn_game_menu(message: Message) -> None:
-        await message.answer('Игровой раздел.', reply_markup=game_menu_kb())
-
-    @router.message(F.text == '🧩 Темы')
-    async def btn_topics_menu(message: Message) -> None:
-        await message.answer('Выбери тему вопросов.', reply_markup=topics_menu_kb())
-
-    @router.message(F.text == '👤 Профиль и рейтинг')
-    async def btn_profile_menu(message: Message) -> None:
-        await message.answer('Профиль и рейтинг.', reply_markup=profile_menu_kb())
-
-    @router.message(F.text == '⚙️ Управление')
-    async def btn_control_menu(message: Message) -> None:
-        await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
-
     @router.message(F.text == '🔥 Блиц 7')
     async def btn_blitz(message: Message) -> None:
         await _start_quiz(message, 7, 'blitz')

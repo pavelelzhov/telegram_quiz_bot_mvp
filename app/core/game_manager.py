@@ -179,10 +179,18 @@ class GameManager:
                 logger.exception('Ошибка прогрева буфера перед стартом: chat_id=%s', chat_id)
 
             if not state.question_buffer:
+                asyncio.create_task(
+                    self.quiz_engine.maybe_start_background_cache_refill(
+                        chat_id=chat_id,
+                        quiz_mode=quiz_mode,
+                        preferred_category=preferred_category,
+                    )
+                )
                 await bot.send_message(
                     chat_id,
                     'Пока не удалось получить LLM-вопросы. '
-                    'Проверь /health и попробуй ещё раз через 1-2 минуты.',
+                    'Я уже запустил фоновое пополнение кэша. '
+                    'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.',
                 )
                 log_operation(
                     logger,

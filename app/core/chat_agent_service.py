@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Optional
 
 from app.agent.memory_store import MemoryStore
@@ -29,18 +30,27 @@ class ChatAgentService:
             return 'warm_support'
 
         pushback_tokens = ['заткнись', 'тупая', 'идиотка', 'дура']
-        if any(token in lowered for token in pushback_tokens):
+        if self._contains_any_token(lowered, pushback_tokens):
             return 'pushback'
-
 
         micro_tokens = [
             'спасибо', 'пасиб', 'благодарю', 'привет', 'здорово', 'доброе утро', 'добрый вечер',
             'лол', 'ахах', 'хаха', 'ок', 'оке', 'понял', 'поняла'
         ]
-        if any(token in lowered for token in micro_tokens):
+        if self._contains_any_token(lowered, micro_tokens):
             return 'micro_reaction'
 
         return fallback_mode
+
+    def _contains_any_token(self, text: str, tokens: list[str]) -> bool:
+        for token in tokens:
+            if ' ' in token:
+                if token in text:
+                    return True
+                continue
+            if re.search(rf'(?<!\w){re.escape(token)}(?!\w)', text, flags=re.IGNORECASE):
+                return True
+        return False
 
     async def generate_reply(
         self,

@@ -31,6 +31,9 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.detect_mode('заткнись уже'), 'pushback')
         self.assertEqual(self.service.detect_mode('привет, как дела?'), 'micro_reaction')
 
+        self.assertEqual(self.service.detect_mode('покажи настройки'), 'addressed_reply')
+        self.assertEqual(self.service.detect_mode('придурок какой-то'), 'addressed_reply')
+
 
     async def test_generate_reply_passes_micro_reaction_mode(self) -> None:
         reply = await self.service.generate_reply(

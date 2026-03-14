@@ -11,9 +11,11 @@ from aiogram import Bot
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.difficulty_service import DifficultyService
 from app.core.answer_flow_service import AnswerFlowService
 from app.core.chat_config_service import ChatConfigService
 from app.core.chat_history_service import ChatHistoryService
+from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
@@ -21,7 +23,7 @@ from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
 from app.core.invite_service import InviteService
 from app.core.invite_orchestration_service import InviteOrchestrationService
-from app.core.models import ChatSettings, GameState, QuizQuestion
+from app.core.models import ChatSettings, GameState, QuestionUsageRecord, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.core.round_lifecycle_service import RoundLifecycleService
 from app.core.team_mode_service import TeamModeService
@@ -29,6 +31,7 @@ from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
+from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +46,17 @@ class GameManager:
         self.invite_service = InviteService()
         self.invite_orchestration = InviteOrchestrationService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
-        self.answer_flow = AnswerFlowService()
+        self.difficulty_service = DifficultyService()
+        self.answer_flow = AnswerFlowService(db=db, difficulty_service=self.difficulty_service)
         self.chat_participation = ChatParticipationService()
         self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
-        self.quiz_engine = QuizEngineService()
+        self.quiz_engine = QuizEngineService(db=db, llm_provider=question_provider)
         self.chat_config = ChatConfigService()
         self.round_lifecycle = RoundLifecycleService()
         self.chat_history = ChatHistoryService(max_items=20)
+        self.daily_challenge = DailyChallengeService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
@@ -157,8 +162,55 @@ class GameManager:
                 preferred_category=preferred_category,
                 quiz_mode=quiz_mode,
                 team_assignments=team_assignments,
+                mode='team_battle' if quiz_mode == 'team2v2' else 'group_blitz',
+                local_game_date=self.daily_challenge.resolve_local_game_date(cfg.timezone),
+                adaptive_enabled=cfg.adaptive_mode_enabled,
+                topic_focus=list(cfg.preferred_topics),
             )
+
+            try:
+                await asyncio.wait_for(
+                    self.quiz_engine.prepare_question_buffer(state, [started_by_user_id]),
+                    timeout=4.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning('Прогрев буфера превысил таймаут: chat_id=%s', chat_id)
+            except Exception:
+                logger.exception('Ошибка прогрева буфера перед стартом: chat_id=%s', chat_id)
+
+            if not state.question_buffer:
+                asyncio.create_task(
+                    self.quiz_engine.maybe_start_background_cache_refill(
+                        chat_id=chat_id,
+                        quiz_mode=quiz_mode,
+                        preferred_category=preferred_category,
+                    )
+                )
+                await bot.send_message(
+                    chat_id,
+                    'Пока не удалось получить LLM-вопросы. '
+                    'Я уже запустил фоновое пополнение кэша. '
+                    'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.',
+                )
+                log_operation(
+                    logger,
+                    operation='game_start',
+                    chat_id=chat_id,
+                    result='no_llm_questions',
+                    duration_ms=(time.perf_counter() - started) * 1000,
+                    extra={'question_limit': question_limit, 'quiz_mode': quiz_mode},
+                    level=logging.WARNING,
+                )
+                return 'Сейчас нет готовых LLM-вопросов для старта. Попробуй позже.'
+
             self.games[chat_id] = state
+            asyncio.create_task(
+                self.quiz_engine.maybe_start_background_cache_refill(
+                    chat_id=chat_id,
+                    quiz_mode=quiz_mode,
+                    preferred_category=preferred_category,
+                )
+            )
 
             mode_label = self._mode_label(quiz_mode)
 
@@ -239,8 +291,17 @@ class GameManager:
 
         if verdict == 'wrong':
             self.adaptive_difficulty.note_wrong(chat_id)
+            state.wrong_attempts_count += 1
             if self.answer_flow.register_wrong_attempt(state, user_id):
+                response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+                await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
                 await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
+            if state.wrong_attempts_count >= 3:
+                self._cancel_question_task(chat_id)
+                state.last_correct_user_id = None
+                state.correct_streak_count = 0
+                await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
+                await self._ask_next_question(bot, chat_id)
             return False
 
         if verdict == 'close':
@@ -252,6 +313,8 @@ class GameManager:
         question = state.current_question
         self.adaptive_difficulty.note_correct(chat_id)
         points_awarded, streak_count = self.answer_flow.register_correct_answer(state, user_id, username)
+        response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+        await self.answer_flow.finalize_answer(state, user_id, was_correct=True, response_ms=response_ms)
         self.memory_store.note_quiz_event(chat_id, user_id, username, correct=True)
 
         await self.product_store.note_correct(
@@ -446,27 +509,26 @@ class GameManager:
             await self._finalize_game(bot, chat_id)
             return
 
-        cfg = self.get_chat_settings(chat_id)
-        used_keys = set(state.used_question_keys)
-        used_keys.update(self.recent_question_keys.get(chat_id, []))
-
         next_number = state.asked_count + 1
         stage = self._determine_stage(state, next_number)
-        target_difficulty = self.adaptive_difficulty.target_difficulty(chat_id, state.asked_count)
 
         try:
-            question = await self.question_provider.generate_question(
-                chat_id=chat_id,
-                used_keys=used_keys,
-                preferred_category=state.preferred_category,
-                allow_image_rounds=cfg.image_rounds_enabled,
-                allow_music_rounds=cfg.music_rounds_enabled,
-                stage=stage,
-                preferred_difficulty=target_difficulty,
-            )
+            await self.quiz_engine.prepare_question_buffer(state, list(state.scores.keys()))
+            question = await self.quiz_engine.select_next_question(state)
+            if question is None:
+                await self.quiz_engine.request_generation_if_buffer_low(state)
+                question = await self.quiz_engine.select_next_question(state)
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
-            await bot.send_message(chat_id, 'Не удалось получить вопрос. Игра завершена.')
+            await bot.send_message(chat_id, 'Не удалось получить вопрос из LLM-кэша. Попробуйте ещё раз через минуту.')
+            await self._finalize_game(bot, chat_id)
+            return
+
+        if question is None:
+            await bot.send_message(
+                chat_id,
+                'Сейчас нет готовых LLM-вопросов в кэше. '                'Скорее всего, LLM временно недоступен или вернул невалидный пакет. '                'Проверь /health и попробуй запустить игру чуть позже.',
+            )
             await self._finalize_game(bot, chat_id)
             return
 
@@ -478,7 +540,15 @@ class GameManager:
         state.hints_used_for_current_question = 0
         state.near_miss_user_ids = set()
         state.wrong_reply_user_ids = set()
+        state.wrong_attempts_count = 0
         state.used_question_keys.add(question.key)
+        if question.question_id is not None:
+            state.question_ids_used_in_game.add(question.question_id)
+        if question.uniqueness_hash:
+            state.uniqueness_hashes_used_in_game.add(question.uniqueness_hash)
+        answer_fingerprint = normalize_text(question.answer)
+        if answer_fingerprint:
+            state.answer_fingerprints_used_in_game.add(answer_fingerprint)
         self.recent_question_keys[chat_id].append(question.key)
         state.asked_count += 1
 
@@ -487,6 +557,13 @@ class GameManager:
 
         task = asyncio.create_task(self._question_timeout(bot, chat_id, state.asked_count))
         self.question_tasks[chat_id] = task
+        asyncio.create_task(
+            self.quiz_engine.maybe_start_background_cache_refill(
+                chat_id=chat_id,
+                quiz_mode=state.quiz_mode,
+                preferred_category=state.preferred_category,
+            )
+        )
 
     async def _question_timeout(self, bot: Bot, chat_id: int, question_number: int) -> None:
         state = self.games.get(chat_id)
@@ -510,6 +587,18 @@ class GameManager:
 
         await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
         self.adaptive_difficulty.note_timeout(chat_id)
+        if state.current_question.question_id is not None:
+            await self.db.log_question_usage(
+                QuestionUsageRecord(
+                    question_id=state.current_question.question_id,
+                    chat_id=chat_id,
+                    shown_at=datetime.fromtimestamp(state.current_question_started_ts, tz=timezone.utc).isoformat(),
+                    answered_at=datetime.now(timezone.utc).isoformat(),
+                    was_correct=False,
+                    response_ms=None,
+                    local_game_date=state.local_game_date,
+                )
+            )
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:

@@ -333,6 +333,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         text = health_service.format_text(snapshot)
         await message.answer(text, reply_markup=main_menu_kb())
 
+    @router.message(Command('buffer_status'))
+    async def cmd_buffer_status(message: Message) -> None:
+        text = await game_manager.quiz_engine.get_refill_status_text(message.chat.id)
+        await message.answer(text, reply_markup=main_menu_kb())
+
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
         await _start_quiz(message, 10, 'classic')
@@ -420,6 +425,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '🩺 Health')
     async def btn_health(message: Message) -> None:
         await cmd_health(message)
+
+    @router.message(F.text == '📦 Буфер LLM')
+    async def btn_buffer_status(message: Message) -> None:
+        await cmd_buffer_status(message)
 
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:

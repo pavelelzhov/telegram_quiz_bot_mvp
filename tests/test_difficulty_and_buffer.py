@@ -92,6 +92,9 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 memory = engine.category_memory_by_chat.get(777, {})
                 self.assertTrue(memory)
                 self.assertIn('Наука', memory)
+                status_text = await engine.get_refill_status_text(chat_id=777)
+                self.assertIn('Статус LLM-буфера', status_text)
+                self.assertIn('Целевой объём', status_text)
             finally:
                 os.remove(path)
 

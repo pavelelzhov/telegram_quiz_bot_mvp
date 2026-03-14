@@ -386,6 +386,32 @@ class QuizEngineService:
             if len(bucket) > 300:
                 del bucket[0]
 
+    async def get_refill_status_text(self, chat_id: int) -> str:
+        if self.db is None:
+            return 'LLM-буфер недоступен: база не подключена.'
+
+        cache_size = await self.db.get_valid_llm_questions_count()
+        inflight = chat_id in self.background_refill_inflight
+        buckets = self.category_memory_by_chat.get(chat_id, {})
+        categories_tracked = len(buckets)
+
+        progress = min(100, int((cache_size / max(1, self.TARGET_CACHE_SIZE)) * 100))
+        refill_state = 'идёт' if inflight else 'не идёт'
+        threshold_hint = (
+            'автопополнение включится при падении ниже 300'
+            if cache_size >= self.LOW_WATERMARK_CACHE_SIZE
+            else 'ниже порога, пополнение должно быть активным'
+        )
+
+        return (
+            '📦 Статус LLM-буфера\n'
+            f'Валидных вопросов в кэше: {cache_size}\n'
+            f'Целевой объём: {self.TARGET_CACHE_SIZE} ({progress}%)\n'
+            f'Фоновое пополнение: {refill_state}\n'
+            f'Категорий в памяти чата: {categories_tracked}\n'
+            f'Порог low-watermark: {self.LOW_WATERMARK_CACHE_SIZE} ({threshold_hint}).'
+        )
+
     async def filter_repeated_questions(self, candidates: list[dict], context: QuestionSelectionContext) -> list[dict]:
         if self.db is None:
             return candidates

@@ -12,7 +12,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.core.models import QuizQuestion
+from app.core.models import QuestionCandidate, QuizQuestion
+from app.core.question_dedup_service import QuestionDedupService
 from app.quiz.history_store import QuizHistoryStore
 from app.utils.ops_log import log_operation
 from app.utils.retry import retry_async
@@ -118,6 +119,7 @@ class LLMQuestionProvider:
         self.history = QuizHistoryStore()
         self.music_rounds = self._load_music_rounds()
         self.semantic_repeat_stats: dict[int, dict[str, float]] = {}
+        self.dedup_service = QuestionDedupService()
 
     async def generate_question(
         self,
@@ -761,3 +763,86 @@ class LLMQuestionProvider:
             status = getattr(exc, 'status_code', None)
             return bool(status in {429} or (isinstance(status, int) and status >= 500))
         return False
+
+
+    async def generate_question_batch(self, request: dict[str, Any]) -> list[QuestionCandidate]:
+        count = int(request.get('count', 10))
+        category = str(request.get('category', CATEGORY_RANDOM))
+        difficulty = str(request.get('difficulty', 'medium'))
+        mode = str(request.get('mode', 'classic'))
+        llm_only = bool(request.get('llm_only', False))
+        batch: list[QuestionCandidate] = []
+        for _ in range(max(1, min(count, 20))):
+            question = await self.generate_question(
+                chat_id=int(request.get('chat_id', 0)),
+                used_keys=set(),
+                preferred_category=category,
+                stage='core',
+                preferred_difficulty=difficulty,
+            )
+            if llm_only and question.source != 'llm':
+                logger.warning('Skip non-llm question in llm_only batch generation: source=%s', question.source)
+                continue
+
+            candidate = QuestionCandidate(
+                provider_name='openai',
+                model_name=self.model,
+                language=str(request.get('language', 'ru')),
+                topic=question.topic or category,
+                subtopic='',
+                difficulty=question.difficulty,
+                question_type=question.question_type,
+                question_text=question.question,
+                options=[],
+                correct_answer_text=question.answer,
+                explanation=question.explanation,
+                canonical_facts=[question.explanation, question.answer],
+                uniqueness_tags=[question.topic or category],
+                created_for_mode=mode,
+                raw_payload={'hint': question.hint, 'aliases': question.aliases, 'source': question.source},
+            )
+            batch.append(candidate)
+        return self.validate_question_batch(batch)
+
+    def validate_question_batch(self, candidates: list[QuestionCandidate]) -> list[QuestionCandidate]:
+        valid: list[QuestionCandidate] = []
+        for candidate in candidates:
+            candidate.question_text = ' '.join(candidate.question_text.split())
+            candidate.correct_answer_text = ' '.join(candidate.correct_answer_text.split())
+            candidate.topic = (candidate.topic or 'Общее').strip()
+            candidate.subtopic = (candidate.subtopic or '').strip()
+            candidate.explanation = ' '.join((candidate.explanation or '').split())
+            candidate.canonical_facts = [str(item).strip() for item in candidate.canonical_facts if str(item).strip()]
+
+            if not candidate.question_text or len(candidate.question_text) < 8:
+                continue
+            if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+                candidate = self.repair_invalid_question(candidate) or candidate
+            if not candidate.correct_answer_text.strip() or not candidate.explanation.strip():
+                repaired = self.repair_invalid_question(candidate)
+                if repaired is None:
+                    continue
+                candidate = repaired
+
+            candidate.question_hash = self.dedup_service.question_hash(candidate)
+            candidate.uniqueness_hash = self.dedup_service.uniqueness_hash(candidate)
+            valid.append(candidate)
+        return valid
+
+    def repair_invalid_question(self, candidate: QuestionCandidate) -> QuestionCandidate | None:
+        if not candidate.question_text.strip() or not candidate.correct_answer_text.strip():
+            return None
+        if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+            candidate.difficulty = 'medium'
+        if not candidate.explanation.strip():
+            candidate.explanation = 'Короткое объяснение недоступно.'
+        return candidate
+
+    def derive_uniqueness_fingerprint(self, candidate: QuestionCandidate) -> dict[str, Any]:
+        canonical_facts = [str(item).strip().lower() for item in candidate.canonical_facts if str(item).strip()]
+        return {
+            'topic': (candidate.topic or '').strip().lower(),
+            'subtopic': (candidate.subtopic or '').strip().lower(),
+            'canonical_facts': canonical_facts,
+            'answer_normalized': (candidate.correct_answer_text or '').strip().lower(),
+        }

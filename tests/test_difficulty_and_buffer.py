@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from app.core.difficulty_service import DifficultyService
 from app.core.models import GameState, PlayerSkillSnapshot, QuestionCandidate, QuestionUsageRecord
 from app.core.quiz_engine_service import QuizEngineService
+from app.config import settings
 from app.storage.db import Database
 
 
@@ -76,6 +77,8 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 return batch
 
         async def _run() -> None:
+            old_generation = settings.quiz_allow_generation
+            settings.quiz_allow_generation = True
             fd, path = tempfile.mkstemp(suffix='.db')
             os.close(fd)
             try:
@@ -96,7 +99,10 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 status_text = await engine.get_refill_status_text(chat_id=777)
                 self.assertIn('Статус LLM-буфера', status_text)
                 self.assertIn('Целевой объём', status_text)
+                self.assertIn('Разбивка по сложности', status_text)
+                self.assertIn('Топ категорий', status_text)
             finally:
+                settings.quiz_allow_generation = old_generation
                 os.remove(path)
 
         asyncio.run(_run())
@@ -137,6 +143,8 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 return batch
 
         async def _run() -> None:
+            old_generation = settings.quiz_allow_generation
+            settings.quiz_allow_generation = True
             fd, path = tempfile.mkstemp(suffix='.db')
             os.close(fd)
             try:
@@ -153,6 +161,7 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 self.assertGreater(provider.calls, 0)
                 self.assertGreaterEqual(await db.get_valid_llm_questions_count(), 4)
             finally:
+                settings.quiz_allow_generation = old_generation
                 os.remove(path)
 
         asyncio.run(_run())
@@ -183,6 +192,8 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 return batch
 
         async def _run() -> None:
+            old_generation = settings.quiz_allow_generation
+            settings.quiz_allow_generation = True
             fd, path = tempfile.mkstemp(suffix='.db')
             os.close(fd)
             try:
@@ -196,6 +207,7 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 self.assertGreaterEqual(len(state.question_buffer), 1)
                 self.assertEqual(state.question_buffer[0].source, 'llm_cache')
             finally:
+                settings.quiz_allow_generation = old_generation
                 os.remove(path)
 
         asyncio.run(_run())
@@ -310,6 +322,29 @@ class DifficultyAndBufferTests(unittest.TestCase):
                 self.assertGreaterEqual(len(state.question_buffer), 1)
                 self.assertEqual(state.question_buffer[0].answer, 'Мадрид')
             finally:
+                os.remove(path)
+
+        asyncio.run(_run())
+
+    def test_generation_is_skipped_when_buffer_only_mode_enabled(self) -> None:
+        class ExplodingProvider:
+            async def generate_question_batch(self, request):
+                raise AssertionError('Генерация не должна вызываться в buffer-only режиме')
+
+        async def _run() -> None:
+            old_generation = settings.quiz_allow_generation
+            settings.quiz_allow_generation = False
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = Database(path)
+                await db.init()
+                engine = QuizEngineService(db=db, llm_provider=ExplodingProvider())
+                state = GameState(chat_id=55, started_by_user_id=1, question_limit=5)
+
+                await engine.request_generation_if_buffer_low(state)
+            finally:
+                settings.quiz_allow_generation = old_generation
                 os.remove(path)
 
         asyncio.run(_run())

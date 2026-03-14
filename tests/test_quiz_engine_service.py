@@ -96,6 +96,21 @@ class QuizEngineServiceTests(unittest.TestCase):
         self.assertEqual(core_epic.point_value, 1)
         self.assertEqual(core_epic.round_label, '🧩 Эпик-раунд')
 
+    def test_mix_candidates_for_variety_interleaves_categories(self) -> None:
+        candidates = [
+            {'id': 1, 'topic': 'История'},
+            {'id': 2, 'topic': 'История'},
+            {'id': 3, 'topic': 'Наука'},
+            {'id': 4, 'topic': 'Наука'},
+            {'id': 5, 'topic': 'Кино'},
+        ]
+
+        mixed = self.service._mix_candidates_for_variety(candidates)
+
+        self.assertEqual(len(mixed), len(candidates))
+        self.assertEqual(sorted(item['id'] for item in mixed), [1, 2, 3, 4, 5])
+        self.assertGreater(len({item.get('topic') for item in mixed[:3]}), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

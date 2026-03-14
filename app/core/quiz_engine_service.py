@@ -131,6 +131,12 @@ class QuizEngineService:
             limit=max(needed, 5),
             topic=game_state.topic_focus[0] if game_state.topic_focus else None,
             mode=game_state.quiz_mode,
+            chat_id=game_state.chat_id,
+            local_game_date=game_state.local_game_date or datetime.now(timezone.utc).date().isoformat(),
+            repeat_window_days=5,
+            same_day_repeat_block_enabled=True,
+            exclude_question_ids=game_state.question_ids_used_in_game,
+            exclude_uniqueness_hashes=game_state.uniqueness_hashes_used_in_game,
         )
         selection_context = QuestionSelectionContext(
             chat_id=game_state.chat_id,

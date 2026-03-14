@@ -247,6 +247,8 @@ class GameManager:
         if verdict == 'wrong':
             self.adaptive_difficulty.note_wrong(chat_id)
             if self.answer_flow.register_wrong_attempt(state, user_id):
+                response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+                await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
                 await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
@@ -526,6 +528,18 @@ class GameManager:
 
         await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
         self.adaptive_difficulty.note_timeout(chat_id)
+        if state.current_question.question_id is not None:
+            await self.db.log_question_usage(
+                QuestionUsageRecord(
+                    question_id=state.current_question.question_id,
+                    chat_id=chat_id,
+                    shown_at=datetime.fromtimestamp(state.current_question_started_ts, tz=timezone.utc).isoformat(),
+                    answered_at=datetime.now(timezone.utc).isoformat(),
+                    was_correct=False,
+                    response_ms=None,
+                    local_game_date=state.local_game_date,
+                )
+            )
         await self._ask_next_question(bot, chat_id)
 
     async def _finalize_game(self, bot: Bot, chat_id: int) -> None:

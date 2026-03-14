@@ -40,6 +40,7 @@ class RepeatWindowPolicyTests(unittest.TestCase):
                 rows = await db.get_candidate_questions('medium', 5)
                 candidate = rows[0]
 
+
                 await db.log_question_usage(
                     record=QuestionUsageRecord(
                         question_id=candidate['id'],
@@ -52,6 +53,17 @@ class RepeatWindowPolicyTests(unittest.TestCase):
                         local_game_date='2026-02-10',
                     )
                 )
+
+                sql_filtered = await db.get_candidate_questions(
+                    'medium',
+                    5,
+                    chat_id=100,
+                    player_id=500,
+                    local_game_date='2026-02-10',
+                    repeat_window_days=3650,
+                    same_day_repeat_block_enabled=True,
+                )
+                self.assertEqual(sql_filtered, [])
 
                 engine = QuizEngineService(db=db, llm_provider=None)
                 ctx_today = QuestionSelectionContext(

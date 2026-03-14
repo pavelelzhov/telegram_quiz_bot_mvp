@@ -251,6 +251,13 @@ class Database:
         limit: int,
         topic: Optional[str] = None,
         mode: Optional[str] = None,
+        chat_id: Optional[int] = None,
+        player_id: Optional[int] = None,
+        local_game_date: Optional[str] = None,
+        repeat_window_days: int = 5,
+        same_day_repeat_block_enabled: bool = True,
+        exclude_question_ids: Optional[set[int]] = None,
+        exclude_uniqueness_hashes: Optional[set[str]] = None,
     ) -> List[dict[str, Any]]:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
@@ -265,6 +272,47 @@ class Database:
             if mode:
                 query += ' AND created_for_mode IN (?, ?)'
                 params.extend([mode, 'classic'])
+
+            exclude_question_ids = exclude_question_ids or set()
+            exclude_uniqueness_hashes = exclude_uniqueness_hashes or set()
+            if exclude_question_ids:
+                placeholders = ','.join('?' for _ in exclude_question_ids)
+                query += f' AND id NOT IN ({placeholders})'
+                params.extend(sorted(exclude_question_ids))
+            if exclude_uniqueness_hashes:
+                placeholders = ','.join('?' for _ in exclude_uniqueness_hashes)
+                query += f' AND uniqueness_hash NOT IN ({placeholders})'
+                params.extend(sorted(exclude_uniqueness_hashes))
+
+            if chat_id is not None and local_game_date and same_day_repeat_block_enabled:
+                query += (
+                    ' AND id NOT IN ('
+                    'SELECT q.question_id FROM question_usage_log q '
+                    'WHERE q.chat_id = ? AND q.local_game_date = ?'
+                    ')'
+                )
+                params.extend([chat_id, local_game_date])
+
+            if chat_id is not None:
+                query += (
+                    ' AND uniqueness_hash NOT IN ('
+                    'SELECT l.uniqueness_hash FROM question_usage_log q '
+                    'JOIN llm_questions l ON l.id = q.question_id '
+                    "WHERE q.chat_id = ? AND q.shown_at >= datetime('now', ?)"
+                    ')'
+                )
+                params.extend([chat_id, f'-{max(1, repeat_window_days)} days'])
+
+            if player_id is not None:
+                query += (
+                    ' AND uniqueness_hash NOT IN ('
+                    'SELECT l.uniqueness_hash FROM question_usage_log q '
+                    'JOIN llm_questions l ON l.id = q.question_id '
+                    "WHERE q.player_id = ? AND q.shown_at >= datetime('now', ?)"
+                    ')'
+                )
+                params.extend([player_id, f'-{max(1, repeat_window_days)} days'])
+
             query += ' ORDER BY quality_score DESC, id DESC LIMIT ?'
             params.append(limit)
             async with db.execute(query, tuple(params)) as cursor:

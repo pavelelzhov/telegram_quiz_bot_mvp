@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
@@ -81,8 +82,27 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if bot_username and f'@{bot_username}' in text:
             return True
 
-        triggers = ['бот', 'квиз бот', 'квиз-бот', 'ведущий']
-        return any(token in text for token in triggers)
+        aliases = [item.strip().lower() for item in settings.alisa_name_aliases.split(',') if item.strip()]
+        canonical_name = settings.alisa_name.strip().lower()
+        if canonical_name and canonical_name not in aliases:
+            aliases.append(canonical_name)
+        for alias in aliases:
+            if re.search(rf'(?<!\\w){re.escape(alias)}(?!\\w)', text, flags=re.IGNORECASE):
+                return True
+        return False
+
+    async def _addressing_signals(message: Message) -> tuple[bool, bool, bool]:
+        is_reply_to_alisa = bool(
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.id == message.bot.id
+        )
+        has_bot_mention = False
+        if message.text:
+            bot_username = await _get_bot_username(message)
+            has_bot_mention = bool(bot_username and f'@{bot_username}' in message.text.lower())
+        has_name = await _is_addressed_to_bot(message)
+        return is_reply_to_alisa, has_bot_mention, has_name
 
     def _help_text(chat_id: int) -> str:
         return (
@@ -589,7 +609,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         username = _sender_username(message)
         if not username:
             return
-        addressed = await _is_addressed_to_bot(message)
+        is_reply_to_alisa, has_bot_mention, has_name = await _addressing_signals(message)
+        addressed = is_reply_to_alisa or has_bot_mention or has_name
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):
             await _send_web_search(message, message.text)
@@ -612,7 +633,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             user_id=message.from_user.id,
             username=username,
             text=message.text,
-            addressed=addressed,
+            is_reply_to_alisa=is_reply_to_alisa,
+            has_bot_mention=has_bot_mention,
         )
 
     return router

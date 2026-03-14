@@ -161,7 +161,20 @@ class QuizEngineService:
         if needed == 0:
             return
 
-        appended = await self._append_candidates_to_buffer(game_state, target_difficulty=target_difficulty, needed=needed)
+        appended = await self._append_candidates_to_buffer(
+            game_state,
+            target_difficulty=target_difficulty,
+            needed=needed,
+            relaxed_repeat=False,
+        )
+
+        if appended == 0:
+            appended = await self._append_candidates_to_buffer(
+                game_state,
+                target_difficulty=target_difficulty,
+                needed=needed,
+                relaxed_repeat=True,
+            )
 
         await self.request_generation_if_buffer_low(game_state)
 
@@ -174,26 +187,52 @@ class QuizEngineService:
                         game_state,
                         target_difficulty=difficulty,
                         needed=post_generation_needed,
+                        relaxed_repeat=False,
                     )
+                    if added == 0:
+                        added = await self._append_candidates_to_buffer(
+                            game_state,
+                            target_difficulty=difficulty,
+                            needed=post_generation_needed,
+                            relaxed_repeat=True,
+                        )
                     if added > 0:
                         break
 
-    async def _append_candidates_to_buffer(self, game_state: GameState, target_difficulty: str, needed: int) -> int:
+    async def _append_candidates_to_buffer(
+        self,
+        game_state: GameState,
+        target_difficulty: str,
+        needed: int,
+        relaxed_repeat: bool,
+    ) -> int:
         if self.db is None or needed <= 0:
             return 0
+
+        chat_id_for_query = None if relaxed_repeat else game_state.chat_id
+        same_day_repeat_block = False if relaxed_repeat else True
+        repeat_window_days = 1 if relaxed_repeat else 5
 
         candidates = await self.db.get_candidate_questions(
             difficulty=target_difficulty,
             limit=max(needed, 5),
             topic=game_state.topic_focus[0] if game_state.topic_focus else None,
             mode=game_state.quiz_mode,
-            chat_id=game_state.chat_id,
+            chat_id=chat_id_for_query,
             local_game_date=game_state.local_game_date or datetime.now(timezone.utc).date().isoformat(),
-            repeat_window_days=5,
-            same_day_repeat_block_enabled=True,
+            repeat_window_days=repeat_window_days,
+            same_day_repeat_block_enabled=same_day_repeat_block,
             exclude_question_ids=game_state.question_ids_used_in_game,
             exclude_uniqueness_hashes=game_state.uniqueness_hashes_used_in_game,
         )
+        if relaxed_repeat and candidates:
+            logger.info(
+                'Relaxed repeat policy selected %s candidates for chat_id=%s mode=%s difficulty=%s',
+                len(candidates),
+                game_state.chat_id,
+                game_state.quiz_mode,
+                target_difficulty,
+            )
         selection_context = QuestionSelectionContext(
             chat_id=game_state.chat_id,
             local_game_date=game_state.local_game_date or datetime.now(timezone.utc).date().isoformat(),
@@ -202,7 +241,10 @@ class QuizEngineService:
             question_ids_used_in_game=set(game_state.question_ids_used_in_game),
             uniqueness_hashes_used_in_game=set(game_state.uniqueness_hashes_used_in_game),
         )
-        filtered = await self.filter_repeated_questions(candidates, selection_context)
+        if relaxed_repeat:
+            filtered = candidates
+        else:
+            filtered = await self.filter_repeated_questions(candidates, selection_context)
         filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
         appended = 0
         buffer_answer_fingerprints = {

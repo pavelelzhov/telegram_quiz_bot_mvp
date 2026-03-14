@@ -558,6 +558,20 @@ class GameManager:
             )
             return False
 
+        validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
+            text=reply,
+            mode=mode,
+            quiz_active=quiz_active,
+        )
+        if not validated_reply:
+            logger.debug(
+                'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
+                chat_id,
+                user_id,
+                validation_reasons,
+            )
+            return False
+
         self.chat_history.mark_reply(chat_id, now)
         if decision.mode == 'initiative_topic_drop':
             self.participation_decision.mark_initiative(chat_id)

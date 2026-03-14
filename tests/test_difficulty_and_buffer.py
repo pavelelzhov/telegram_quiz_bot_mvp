@@ -100,6 +100,62 @@ class DifficultyAndBufferTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_restart_refill_triggers_when_cache_below_low_watermark(self) -> None:
+        class CountingProvider:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._idx = 0
+
+            async def generate_question_batch(self, request):
+                self.calls += 1
+                batch = []
+                for _ in range(3):
+                    self._idx += 1
+                    num = self._idx
+                    batch.append(
+                        QuestionCandidate(
+                            provider_name='openai',
+                            model_name='gpt-test',
+                            language='ru',
+                            topic='Общие знания',
+                            subtopic='',
+                            difficulty='medium',
+                            question_type='text',
+                            question_text=f'R-вопрос #{num}?',
+                            correct_answer_text=f'R-ответ #{num}',
+                            explanation=f'R-объяснение #{num}',
+                            canonical_facts=[f'r-fact-{num}'],
+                            uniqueness_tags=['restart'],
+                            question_hash=f'r-qh-{num}',
+                            uniqueness_hash=f'r-uh-{num}',
+                        )
+                    )
+                return batch
+
+            def validate_question_batch(self, batch):
+                return batch
+
+        async def _run() -> None:
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = Database(path)
+                await db.init()
+                provider = CountingProvider()
+                engine = QuizEngineService(db=db, llm_provider=provider)
+                engine.TARGET_CACHE_SIZE = 10
+                engine.LOW_WATERMARK_CACHE_SIZE = 4
+                engine.GENERATION_BATCH_SIZE = 3
+
+                await engine.ensure_cache_after_restart()
+
+                self.assertGreater(provider.calls, 0)
+                self.assertGreaterEqual(await db.get_valid_llm_questions_count(), 4)
+            finally:
+                os.remove(path)
+
+        asyncio.run(_run())
+
 
 if __name__ == '__main__':
     unittest.main()

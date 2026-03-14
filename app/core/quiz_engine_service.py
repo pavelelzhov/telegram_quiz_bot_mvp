@@ -290,6 +290,30 @@ class QuizEngineService:
         finally:
             self.background_refill_inflight.discard(chat_id)
 
+    async def ensure_cache_after_restart(self) -> None:
+        if self.db is None or self.llm_provider is None:
+            return
+
+        cache_size = await self.db.get_valid_llm_questions_count()
+        if cache_size >= self.LOW_WATERMARK_CACHE_SIZE:
+            logger.info(
+                'Стартовый контроль кэша: вопросов достаточно, refill не нужен (cache_size=%s, low_watermark=%s)',
+                cache_size,
+                self.LOW_WATERMARK_CACHE_SIZE,
+            )
+            return
+
+        logger.warning(
+            'Стартовый контроль кэша: вопросов мало, запускаю refill (cache_size=%s, low_watermark=%s)',
+            cache_size,
+            self.LOW_WATERMARK_CACHE_SIZE,
+        )
+        await self.maybe_start_background_cache_refill(
+            chat_id=0,
+            quiz_mode='classic',
+            preferred_category='Случайно',
+        )
+
     async def _run_background_cache_refill(self, chat_id: int, quiz_mode: str, preferred_category: str) -> None:
         if self.db is None or self.llm_provider is None:
             return

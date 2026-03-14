@@ -18,6 +18,13 @@ from app.core.chat_history_service import ChatHistoryService
 from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
+from app.core.relationship_profile_service import RelationshipProfileService
+from app.core.alisa_policy import (
+    AddressingPolicyService,
+    ParticipationDecisionService,
+    PersonaPolicyService,
+    ReplyValidationService,
+)
 from app.core.feedback_text_service import FeedbackTextService
 from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
@@ -41,6 +48,7 @@ class GameManager:
         self.db = db
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
+        self.relationship_profiles = RelationshipProfileService(self.memory_store)
         self.chat_agent_service = ChatAgentService(self.memory_store)
         self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
@@ -49,13 +57,17 @@ class GameManager:
         self.difficulty_service = DifficultyService()
         self.answer_flow = AnswerFlowService(db=db, difficulty_service=self.difficulty_service)
         self.chat_participation = ChatParticipationService()
+        self.addressing_policy = AddressingPolicyService()
+        self.participation_decision = ParticipationDecisionService()
+        self.persona_policy = PersonaPolicyService()
+        self.reply_validator = ReplyValidationService()
         self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
         self.quiz_engine = QuizEngineService(db=db, llm_provider=question_provider)
         self.chat_config = ChatConfigService()
         self.round_lifecycle = RoundLifecycleService()
-        self.chat_history = ChatHistoryService(max_items=20)
+        self.chat_history = ChatHistoryService(max_items=settings.alisa_history_window_size)
         self.daily_challenge = DailyChallengeService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
@@ -350,15 +362,36 @@ class GameManager:
         user_id: int,
         username: str,
         text: str,
-        addressed: bool,
+        is_reply_to_alisa: bool,
+        has_bot_mention: bool,
     ) -> bool:
         cfg = self.get_chat_settings(chat_id)
         if not cfg.chat_mode_enabled:
             return False
 
-        self.chat_history.remember_message(chat_id, 'user', username, text)
+        addressing = self.addressing_policy.evaluate(
+            text=text,
+            is_reply_to_alisa=is_reply_to_alisa,
+            has_bot_mention=has_bot_mention,
+        )
+        addressed = addressing.is_addressed
+
+        self.chat_history.remember_message(
+            chat_id,
+            'user',
+            username,
+            text,
+            author_id=user_id,
+            addressed_to_alisa=addressed,
+        )
         self.invite_service.remember_activity(chat_id, user_id, username, text)
-        self.memory_store.note_message(chat_id, user_id, username, text)
+        self.relationship_profiles.note_user_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            text=text,
+            addressed_to_alisa=addressed,
+        )
 
         async def _start_quiz(started_by: int) -> None:
             await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
@@ -376,6 +409,9 @@ class GameManager:
         state = self.games.get(chat_id)
         quiz_active = bool(state and state.is_active)
         current_question_text = state.current_question.question if quiz_active and state and state.current_question else None
+        recent_messages = self.invite_service.recent_message_count(chat_id, 180)
+        recent_unique_users = self.invite_service.recent_unique_user_count(chat_id, 180)
+        tension_level = self.relationship_profiles.get_chat_tension_level(chat_id=chat_id)
 
         if cfg.host_mode_enabled and not quiz_active:
             if await self.invite_orchestration.maybe_send_host_invite(
@@ -387,28 +423,26 @@ class GameManager:
             ):
                 return True
 
-        if quiz_active and not addressed:
-            return False
-
-        now = time.time()
-        cooldown = self.chat_participation.resolve_cooldown(
-            addressed=addressed,
-            host_mode_enabled=cfg.host_mode_enabled,
+        decision = self.participation_decision.decide(
+            chat_id=chat_id,
+            user_id=user_id,
+            addressed=addressing,
+            quiz_active=quiz_active,
+            recent_messages=recent_messages,
+            recent_unique_users=recent_unique_users,
+            tension_level=tension_level,
         )
-        if cooldown is None:
+        if not decision.should_reply:
+            logger.debug('Alisa silence chat_id=%s user_id=%s reasons=%s', chat_id, user_id, decision.reason_codes)
             return False
 
-        if not self.chat_history.can_reply(chat_id, now, cooldown):
+        mode = decision.mode
+        if mode == 'addressed_reply':
+            mode = self.persona_policy.choose_mode(text=text, addressed_by=addressing.addressed_by, quiz_active=quiz_active)
+        now = time.time()
+        if decision.cooldown_sec is not None and not self.chat_history.can_reply(chat_id, now, decision.cooldown_sec):
+            logger.debug('Alisa suppressed by history cooldown chat_id=%s', chat_id)
             return False
-
-        if not addressed:
-            if not self.chat_participation.passes_passive_reply_filters(
-                recent_unique_users=self.invite_service.recent_unique_user_count(chat_id, 180),
-                recent_messages=self.invite_service.recent_message_count(chat_id, 180),
-                text=text,
-                random_value=random.random(),
-            ):
-                return False
 
         reply = await self.chat_agent_service.generate_reply(
             chat_id=chat_id,
@@ -420,13 +454,50 @@ class GameManager:
             quiz_active=quiz_active,
             current_question_text=current_question_text,
             addressed=addressed,
+            mode=mode,
         )
         if not reply:
             return False
 
+        validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
+            text=reply,
+            mode=mode,
+            quiz_active=quiz_active,
+        )
+        if not validated_reply:
+            logger.debug(
+                'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
+                chat_id,
+                user_id,
+                validation_reasons,
+            )
+            return False
+
         self.chat_history.mark_reply(chat_id, now)
-        self.chat_history.remember_message(chat_id, 'assistant', 'quiz_bot', reply)
-        await bot.send_message(chat_id, reply)
+        if decision.mode == 'initiative_topic_drop':
+            self.participation_decision.mark_initiative(chat_id)
+        else:
+            self.participation_decision.mark_replied(chat_id)
+        self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
+        self.chat_history.remember_message(
+            chat_id,
+            'assistant',
+            settings.alisa_name,
+            validated_reply,
+            author_id=bot.id,
+            addressed_to_alisa=False,
+        )
+        await bot.send_message(chat_id, validated_reply)
+        logger.debug(
+            'Alisa replied chat_id=%s user_id=%s mode=%s addressed_by=%s decision_reasons=%s validation_reasons=%s rewritten=%s',
+            chat_id,
+            user_id,
+            mode,
+            addressing.addressed_by,
+            decision.reason_codes,
+            validation_reasons,
+            rewritten,
+        )
         return True
 
     async def give_hint(self, bot: Bot, chat_id: int) -> str:

@@ -15,6 +15,12 @@ class KeyboardsLayoutTests(unittest.TestCase):
             flat = [button.text for row in kb.keyboard for button in row]
             self.assertIn('🏠 Главное меню', flat)
 
+    def test_game_menu_uses_25_questions_and_hides_team_pick_buttons(self) -> None:
+        flat = [button.text for row in game_menu_kb().keyboard for button in row]
+        self.assertIn('🎯 Классика 25', flat)
+        self.assertNotIn('🟥 Team Alpha', flat)
+        self.assertNotIn('🟦 Team Beta', flat)
+
 
 if __name__ == '__main__':
     unittest.main()

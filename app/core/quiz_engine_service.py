@@ -14,6 +14,7 @@ from app.core.models import (
     QuizQuestion,
 )
 from app.core.question_dedup_service import QuestionDedupService
+from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,17 @@ class QuizEngineService:
         filtered = await self.filter_repeated_questions(candidates, selection_context)
         filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
         appended = 0
+        buffer_answer_fingerprints = {
+            normalize_text(str(item.answer or ''))
+            for item in game_state.question_buffer
+            if str(item.answer or '').strip()
+        }
         for item in filtered[:needed]:
+            answer_fingerprint = normalize_text(str(item.get('correct_answer_text') or ''))
+            if answer_fingerprint and answer_fingerprint in game_state.answer_fingerprints_used_in_game:
+                continue
+            if answer_fingerprint and answer_fingerprint in buffer_answer_fingerprints:
+                continue
             game_state.question_buffer.append(
                 QuizQuestion(
                     category=item.get('topic') or 'Общие знания',
@@ -223,6 +234,8 @@ class QuizEngineService:
                     quality_score=float(item.get('quality_score') or 0),
                 )
             )
+            if answer_fingerprint:
+                buffer_answer_fingerprints.add(answer_fingerprint)
             appended += 1
 
         return appended

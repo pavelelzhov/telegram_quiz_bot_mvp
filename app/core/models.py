@@ -165,6 +165,7 @@ class GameState:
     target_difficulty_by_player: Dict[int, str] = field(default_factory=dict)
     question_ids_used_in_game: Set[int] = field(default_factory=set)
     uniqueness_hashes_used_in_game: Set[str] = field(default_factory=set)
+    answer_fingerprints_used_in_game: Set[str] = field(default_factory=set)
     round_index: int = 0
     question_buffer: List[QuizQuestion] = field(default_factory=list)
     generation_inflight: bool = False

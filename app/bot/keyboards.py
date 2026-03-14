@@ -20,7 +20,7 @@ BUTTON_TEXTS = set(BUTTON_TO_CATEGORY.keys()) | {
     '🧩 Темы',
     '👤 Профиль и рейтинг',
     '⚙️ Управление',
-    '🎯 Классика 10',
+    '🎯 Классика 25',
     '🔥 Блиц 7',
     '👑 Эпик 12',
     '💡 Подсказка',
@@ -35,12 +35,8 @@ BUTTON_TEXTS = set(BUTTON_TO_CATEGORY.keys()) | {
     '⛔ Стоп',
     '⚙️ Настройки',
     '⏱ Таймер',
-    '🖼 Картинки',
-    '🎧 Музыка-раунды',
     '👮 Админ-режим',
     '🤖 Host-режим',
-    '🟥 Team Alpha',
-    '🟦 Team Beta',
     '🤝 Лобби 2v2',
     '🚀 Старт 2v2',
     '🛑 Стоп 2v2',
@@ -68,9 +64,8 @@ def compact_main_menu_kb() -> ReplyKeyboardMarkup:
 def game_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text='🎯 Классика 10'), KeyboardButton(text='🔥 Блиц 7'), KeyboardButton(text='👑 Эпик 12')],
+            [KeyboardButton(text='🎯 Классика 25'), KeyboardButton(text='🔥 Блиц 7'), KeyboardButton(text='👑 Эпик 12')],
             [KeyboardButton(text='🧠 Solo Start'), KeyboardButton(text='📅 Daily')],
-            [KeyboardButton(text='🟥 Team Alpha'), KeyboardButton(text='🟦 Team Beta')],
             [KeyboardButton(text='🤝 Лобби 2v2'), KeyboardButton(text='🚀 Старт 2v2'), KeyboardButton(text='🛑 Стоп 2v2')],
             [KeyboardButton(text='💡 Подсказка'), KeyboardButton(text='⏭ Пропустить')],
             [KeyboardButton(text='🏠 Главное меню')],
@@ -111,7 +106,6 @@ def control_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text='⚙️ Настройки'), KeyboardButton(text='⏱ Таймер')],
-            [KeyboardButton(text='🖼 Картинки'), KeyboardButton(text='🎧 Музыка-раунды')],
             [KeyboardButton(text='👮 Админ-режим'), KeyboardButton(text='🤖 Host-режим')],
             [KeyboardButton(text='🩺 Health'), KeyboardButton(text='📦 Буфер LLM')],
             [KeyboardButton(text='⛔ Стоп')],

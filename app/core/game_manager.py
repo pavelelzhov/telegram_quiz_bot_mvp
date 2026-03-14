@@ -31,6 +31,7 @@ from app.providers.llm_provider import LLMQuestionProvider
 from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
+from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,7 @@ class GameManager:
                 mode='team_battle' if quiz_mode == 'team2v2' else 'group_blitz',
                 local_game_date=self.daily_challenge.resolve_local_game_date(cfg.timezone),
                 adaptive_enabled=cfg.adaptive_mode_enabled,
+                topic_focus=list(cfg.preferred_topics),
             )
 
             try:
@@ -536,6 +538,9 @@ class GameManager:
             state.question_ids_used_in_game.add(question.question_id)
         if question.uniqueness_hash:
             state.uniqueness_hashes_used_in_game.add(question.uniqueness_hash)
+        answer_fingerprint = normalize_text(question.answer)
+        if answer_fingerprint:
+            state.answer_fingerprints_used_in_game.add(answer_fingerprint)
         self.recent_question_keys[chat_id].append(question.key)
         state.asked_count += 1
 

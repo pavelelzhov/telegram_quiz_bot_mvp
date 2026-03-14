@@ -234,7 +234,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if command.args:
             try:
                 parsed = int(command.args.strip())
-                if parsed in {5, 7, 10, 12, 15}:
+                if parsed in {5, 7, 10, 12, 15, 25}:
                     question_limit = parsed
             except ValueError:
                 pass
@@ -357,9 +357,29 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         text = await game_manager.quiz_engine.get_refill_status_text(message.chat.id)
         await message.answer(text, reply_markup=main_menu_kb())
 
-    @router.message(F.text == '🎯 Классика 10')
+    @router.message(F.text == '🎯 Классика 25')
     async def btn_classic(message: Message) -> None:
-        await _start_quiz(message, 10, 'classic')
+        await _start_quiz(message, 25, 'classic')
+
+    @router.message(F.text == '🏠 Главное меню')
+    async def btn_home_menu(message: Message) -> None:
+        await message.answer('Открываю главное меню.', reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🎮 Игровое меню')
+    async def btn_game_menu(message: Message) -> None:
+        await message.answer('Игровой раздел.', reply_markup=game_menu_kb())
+
+    @router.message(F.text == '🧩 Темы')
+    async def btn_topics_menu(message: Message) -> None:
+        await message.answer('Выбери тему вопросов.', reply_markup=topics_menu_kb())
+
+    @router.message(F.text == '👤 Профиль и рейтинг')
+    async def btn_profile_menu(message: Message) -> None:
+        await message.answer('Профиль и рейтинг.', reply_markup=profile_menu_kb())
+
+    @router.message(F.text == '⚙️ Управление')
+    async def btn_control_menu(message: Message) -> None:
+        await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
 
     @router.message(F.text == '🏠 Главное меню')
     async def btn_home_menu(message: Message) -> None:
@@ -429,6 +449,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def btn_set_category(message: Message) -> None:
         category = BUTTON_TO_CATEGORY[message.text]
         game_manager.set_preferred_category(message.chat.id, category)
+        topics = [] if category == 'Случайно' else [category]
+        game_manager.chat_config.set_preferred_topics(message.chat.id, topics)
         await message.answer(
             f'🎯 Тема для следующей игры: {category}',
             reply_markup=main_menu_kb(),

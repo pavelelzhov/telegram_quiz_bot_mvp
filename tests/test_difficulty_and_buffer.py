@@ -199,6 +199,61 @@ class DifficultyAndBufferTests(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_buffer_avoids_same_answer_duplicates_inside_game(self) -> None:
+        async def _run() -> None:
+            fd, path = tempfile.mkstemp(suffix='.db')
+            os.close(fd)
+            try:
+                db = Database(path)
+                await db.init()
+                engine = QuizEngineService(db=db, llm_provider=None)
+                state = GameState(chat_id=33, started_by_user_id=1, question_limit=5)
+
+                await db.save_generated_questions(
+                    [
+                        QuestionCandidate(
+                            provider_name='openai',
+                            model_name='gpt-test',
+                            language='ru',
+                            topic='География',
+                            subtopic='',
+                            difficulty='medium',
+                            question_type='text',
+                            question_text='Столица Германии?',
+                            correct_answer_text='Берлин',
+                            explanation='Берлин — столица Германии.',
+                            canonical_facts=['Германия', 'Берлин'],
+                            uniqueness_tags=['geo'],
+                            question_hash='ans-qh-1',
+                            uniqueness_hash='ans-uh-1',
+                        ),
+                        QuestionCandidate(
+                            provider_name='openai',
+                            model_name='gpt-test',
+                            language='ru',
+                            topic='География',
+                            subtopic='',
+                            difficulty='medium',
+                            question_type='text',
+                            question_text='Какой город столица ФРГ?',
+                            correct_answer_text='Берлин',
+                            explanation='Ответ тот же: Берлин.',
+                            canonical_facts=['ФРГ', 'Берлин'],
+                            uniqueness_tags=['geo'],
+                            question_hash='ans-qh-2',
+                            uniqueness_hash='ans-uh-2',
+                        ),
+                    ]
+                )
+
+                await engine.ensure_minimum_buffer(state, target_difficulty='medium')
+                answers = [item.answer for item in state.question_buffer]
+                self.assertEqual(answers.count('Берлин'), 1)
+            finally:
+                os.remove(path)
+
+        asyncio.run(_run())
+
 
 if __name__ == '__main__':
     unittest.main()

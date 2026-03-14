@@ -143,6 +143,8 @@ class ParticipationDecisionService:
             return ParticipationDecision(False, 'observed_silence', ['suppressed_policy_alisa_disabled'], quiz_active, None)
 
         if not addressed.is_addressed:
+            if quiz_active:
+                return ParticipationDecision(False, 'observed_silence', ['suppressed_quiz_mode', *addressed.reason_codes], quiz_active, None)
             return ParticipationDecision(False, 'observed_silence', addressed.reason_codes, quiz_active, None)
 
         now = time.time()

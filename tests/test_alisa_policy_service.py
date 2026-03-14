@@ -55,6 +55,15 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         self.assertFalse(decision.should_reply)
         self.assertIn('suppressed_cooldown', decision.reason_codes)
 
+    def test_quiz_mode_suppression_reason(self) -> None:
+        decision = self.service.decide(
+            chat_id=42,
+            addressed=AddressingDecision(False, None, ['suppressed_not_addressed']),
+            quiz_active=True,
+        )
+        self.assertFalse(decision.should_reply)
+        self.assertIn('suppressed_quiz_mode', decision.reason_codes)
+
 
 class ReplyValidationServiceTests(unittest.TestCase):
     def setUp(self) -> None:

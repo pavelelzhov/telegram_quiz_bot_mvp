@@ -6,8 +6,11 @@ from zoneinfo import ZoneInfo
 
 class DailyChallengeService:
     def is_timezone_supported(self, timezone_name: str) -> bool:
+        tz_name = (timezone_name or '').strip()
+        if tz_name.upper() in {'UTC', 'ETC/UTC', 'Z'}:
+            return True
         try:
-            ZoneInfo((timezone_name or '').strip())
+            ZoneInfo(tz_name)
             return True
         except Exception:
             return False

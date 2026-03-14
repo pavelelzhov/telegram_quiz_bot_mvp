@@ -32,6 +32,14 @@ class ChatAgentService:
         if any(token in lowered for token in pushback_tokens):
             return 'pushback'
 
+
+        micro_tokens = [
+            'спасибо', 'пасиб', 'благодарю', 'привет', 'здорово', 'доброе утро', 'добрый вечер',
+            'лол', 'ахах', 'хаха', 'ок', 'оке', 'понял', 'поняла'
+        ]
+        if any(token in lowered for token in micro_tokens):
+            return 'micro_reaction'
+
         return fallback_mode
 
     async def generate_reply(

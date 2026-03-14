@@ -96,6 +96,10 @@ class PersonaPolicyService:
             'Ситуация: нужна короткая человеческая поддержка. '
             '1–2 короткие фразы, без лекций и без шаблонов ассистента.'
         ),
+        'micro_reaction': (
+            'Ситуация: лёгкий бытовой контакт (привет/спасибо/лол). '
+            'Ответь коротко и естественно, обычно одной фразой.'
+        ),
         'initiative_topic_drop': (
             'Ситуация: Алиса сама включается в беседу. '
             'Реплика должна быть органичной, короткой и не выглядеть как шаблон бота.'
@@ -300,7 +304,12 @@ class ReplyValidationService:
                 reasons.append('suppressed_ai_phrase')
                 return '', reasons, rewritten
 
-        max_chars = settings.alisa_support_max_chars if mode == 'warm_support' else settings.alisa_reply_max_chars
+        if mode == 'warm_support':
+            max_chars = settings.alisa_support_max_chars
+        elif mode == 'micro_reaction':
+            max_chars = min(settings.alisa_reply_max_chars, 90)
+        else:
+            max_chars = settings.alisa_reply_max_chars
         if len(value) > max_chars:
             value = value[: max_chars - 1].rstrip() + '…'
             reasons.append('clamped_max_chars')

@@ -29,7 +29,27 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_detect_mode(self) -> None:
         self.assertEqual(self.service.detect_mode('мне тревожно и плохо'), 'warm_support')
         self.assertEqual(self.service.detect_mode('заткнись уже'), 'pushback')
-        self.assertEqual(self.service.detect_mode('привет, как дела?'), 'addressed_reply')
+        self.assertEqual(self.service.detect_mode('привет, как дела?'), 'micro_reaction')
+
+
+    async def test_generate_reply_passes_micro_reaction_mode(self) -> None:
+        reply = await self.service.generate_reply(
+            chat_id=2,
+            chat_title='Micro Chat',
+            user_id=11,
+            username='v',
+            text='спасибо! очень помогла',
+            history=[{'role': 'user', 'speaker': 'v', 'text': 'спасибо! очень помогла'}],
+            quiz_active=False,
+            current_question_text=None,
+            addressed=True,
+            mode='addressed_reply',
+        )
+
+        self.assertEqual(reply, 'ok-reply')
+        self.assertIsNotNone(self.provider.last_kwargs)
+        assert self.provider.last_kwargs is not None
+        self.assertEqual(self.provider.last_kwargs.get('mode'), 'micro_reaction')
 
     async def test_generate_reply_passes_mode_and_context(self) -> None:
         self.memory_store.note_message(chat_id=1, user_id=10, username='u', text='старое сообщение')

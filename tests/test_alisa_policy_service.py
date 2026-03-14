@@ -183,6 +183,17 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertFalse(rewritten)
         self.assertIn('suppressed_repeated_reply', reasons)
 
+
+    def test_micro_reaction_has_stricter_length_limit(self) -> None:
+        text, reasons, rewritten = self.service.validate_and_clamp(
+            text='x' * 200,
+            mode='micro_reaction',
+            quiz_active=False,
+        )
+        self.assertTrue(rewritten)
+        self.assertIn('clamped_max_chars', reasons)
+        self.assertLessEqual(len(text), 90)
+
     def test_length_clamp(self) -> None:
         candidate = 'Очень длинный ответ. ' * 30
         text, reasons, rewritten = self.service.validate_and_clamp(

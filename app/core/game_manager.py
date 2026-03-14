@@ -199,31 +199,11 @@ class GameManager:
 
             cache_size = await self.db.get_valid_llm_questions_count()
             if cache_size < self.quiz_engine.MIN_START_CACHE_SIZE:
-                if settings.quiz_allow_generation:
-                    asyncio.create_task(
-                        self.quiz_engine.maybe_start_background_cache_refill(
-                            chat_id=chat_id,
-                            quiz_mode=quiz_mode,
-                            preferred_category=preferred_category,
-                        )
-                    )
-                await bot.send_message(
-                    chat_id,
-                    (
-                        'Кэш вопросов ещё недостаточно прогрет для уверенного старта без повторов. '
-                        f'Сейчас: {cache_size}, минимум для старта: {self.quiz_engine.MIN_START_CACHE_SIZE}.\n'
-                        + (
-                            'Я уже запустила пополнение. Проверь /buffer_status чуть позже.'
-                            if settings.quiz_allow_generation
-                            else 'Автогенерация выключена: используем только готовый буфер вопросов.'
-                        )
-                    ),
-                )
                 log_operation(
                     logger,
                     operation='game_start',
                     chat_id=chat_id,
-                    result='cache_below_start_threshold',
+                    result='cache_below_start_threshold_soft',
                     duration_ms=(time.perf_counter() - started) * 1000,
                     extra={
                         'question_limit': question_limit,
@@ -231,9 +211,8 @@ class GameManager:
                         'cache_size': cache_size,
                         'min_start_cache_size': self.quiz_engine.MIN_START_CACHE_SIZE,
                     },
-                    level=logging.WARNING,
+                    level=logging.INFO,
                 )
-                return 'Сейчас нет достаточного запаса вопросов для старта. Попробуй позже.'
 
             try:
                 await asyncio.wait_for(

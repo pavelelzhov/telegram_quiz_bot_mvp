@@ -473,7 +473,10 @@ class GameManager:
             return
 
         if question is None:
-            await bot.send_message(chat_id, 'Сейчас нет готовых LLM-вопросов в кэше. Попробуйте запустить игру чуть позже.')
+            await bot.send_message(
+                chat_id,
+                'Сейчас нет готовых LLM-вопросов в кэше. '                'Скорее всего, LLM временно недоступен или вернул невалидный пакет. '                'Проверь /health и попробуй запустить игру чуть позже.',
+            )
             await self._finalize_game(bot, chat_id)
             return
 

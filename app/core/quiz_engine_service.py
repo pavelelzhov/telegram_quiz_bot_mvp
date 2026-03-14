@@ -262,6 +262,13 @@ class QuizEngineService:
 
             if accepted:
                 await self.db.save_generated_questions(accepted)
+            else:
+                logger.warning(
+                    'Пакет генерации не дал валидных LLM-вопросов: chat_id=%s, mode=%s, valid_batch=%s',
+                    game_state.chat_id,
+                    game_state.quiz_mode,
+                    len(valid_batch),
+                )
         except Exception:
             logger.exception('Не удалось догенерировать пакет вопросов для буфера')
         finally:

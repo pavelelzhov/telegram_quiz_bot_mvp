@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Deque, Dict, Optional
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramNetworkError
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
@@ -40,8 +41,22 @@ from app.quiz.product_store import ProductStore
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
 from app.utils.text import normalize_text
+from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
+
+
+def _should_retry_telegram_send(exc: Exception) -> bool:
+    return isinstance(exc, (TelegramNetworkError, asyncio.TimeoutError, OSError))
+
+
+async def safe_bot_send_message(bot: Bot, chat_id: int, text: str, **kwargs: object) -> None:
+    await retry_async(
+        lambda: bot.send_message(chat_id, text, **kwargs),
+        retries=2,
+        base_delay_sec=0.5,
+        should_retry=_should_retry_telegram_send,
+    )
 
 
 class GameManager:
@@ -577,7 +592,23 @@ class GameManager:
             author_id=bot.id,
             addressed_to_alisa=False,
         )
-        await bot.send_message(chat_id, validated_reply)
+        try:
+            await safe_bot_send_message(bot, chat_id, validated_reply)
+        except Exception as exc:  # noqa: BLE001
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='send_message_failed',
+                    reason_codes=['suppressed_telegram_send_error'],
+                    mode=mode,
+                    rewritten=rewritten,
+                    message_id=message_id,
+                    extra={'error': str(exc)},
+                )
+            )
+            logger.warning('Alisa send_message failed chat_id=%s user_id=%s: %s', chat_id, user_id, exc)
+            return False
         self.decision_audit.record(
             DecisionAuditEvent(
                 chat_id=chat_id,

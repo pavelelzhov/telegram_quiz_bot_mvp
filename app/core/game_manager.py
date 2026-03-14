@@ -522,18 +522,35 @@ class GameManager:
             logger.debug('Alisa suppressed by history cooldown chat_id=%s', chat_id)
             return False
 
-        reply = await self.chat_agent_service.generate_reply(
-            chat_id=chat_id,
-            chat_title=chat_title,
-            user_id=user_id,
-            username=username,
-            text=text,
-            history=self.chat_history.get_history(chat_id),
-            quiz_active=quiz_active,
-            current_question_text=current_question_text,
-            addressed=addressed,
-            mode=mode,
-        )
+        try:
+            reply = await asyncio.wait_for(
+                self.chat_agent_service.generate_reply(
+                    chat_id=chat_id,
+                    chat_title=chat_title,
+                    user_id=user_id,
+                    username=username,
+                    text=text,
+                    history=self.chat_history.get_history(chat_id),
+                    quiz_active=quiz_active,
+                    current_question_text=current_question_text,
+                    addressed=addressed,
+                    mode=mode,
+                ),
+                timeout=max(1.0, float(settings.alisa_generation_timeout_seconds)),
+            )
+        except asyncio.TimeoutError:
+            self.decision_audit.record(
+                DecisionAuditEvent(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    stage='provider_timeout',
+                    reason_codes=['suppressed_provider_timeout'],
+                    mode=mode,
+                    message_id=message_id,
+                )
+            )
+            logger.warning('Alisa provider timeout chat_id=%s user_id=%s mode=%s', chat_id, user_id, mode)
+            return False
         if not reply:
             self.decision_audit.record(
                 DecisionAuditEvent(

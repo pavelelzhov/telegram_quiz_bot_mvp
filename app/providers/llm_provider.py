@@ -12,7 +12,8 @@ from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimi
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.core.models import QuizQuestion
+from app.core.models import QuestionCandidate, QuizQuestion
+from app.core.question_dedup_service import QuestionDedupService
 from app.quiz.history_store import QuizHistoryStore
 from app.utils.ops_log import log_operation
 from app.utils.retry import retry_async
@@ -118,6 +119,7 @@ class LLMQuestionProvider:
         self.history = QuizHistoryStore()
         self.music_rounds = self._load_music_rounds()
         self.semantic_repeat_stats: dict[int, dict[str, float]] = {}
+        self.dedup_service = QuestionDedupService()
 
     async def generate_question(
         self,
@@ -198,22 +200,17 @@ class LLMQuestionProvider:
             return question
         except Exception as exc:
             logger.exception('LLM question generation failed: %s', exc)
-            fallback = self._pick_text_fallback_question(chat_id, recent_keys, category)
-            fallback['key'] = self._question_key(fallback['question'], fallback['answer'])
-            question = QuizQuestion(**fallback, source='fallback')
-            self._apply_stage_profile(question, stage)
-            self._remember_question(chat_id, question)
             log_operation(
                 logger,
                 operation='question_generate',
                 chat_id=chat_id,
-                result='fallback',
+                result='llm_failed',
                 duration_ms=(time.perf_counter() - started) * 1000,
                 error_type=type(exc).__name__,
-                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
-                level=logging.WARNING,
+                extra={'round_type': round_type, 'stage': stage},
+                level=logging.ERROR,
             )
-            return question
+            raise
 
     def _apply_stage_profile(self, question: QuizQuestion, stage: str) -> None:
         if stage == 'warmup':
@@ -295,24 +292,6 @@ class LLMQuestionProvider:
         allow_image_rounds: bool,
         allow_music_rounds: bool,
     ) -> str:
-        recent_rounds = self.history.recent_round_types(chat_id, 4)
-        last_round = recent_rounds[-1] if recent_rounds else ''
-
-        if stage == 'special':
-            if allow_music_rounds and category == 'Музыка' and self.music_rounds and last_round != 'audio':
-                return 'audio'
-            if allow_image_rounds and category == 'География' and last_round != 'image':
-                return 'image'
-            return 'text'
-
-        if allow_music_rounds and category == 'Музыка' and self.music_rounds:
-            if last_round != 'audio' and random.random() < 0.25:
-                return 'audio'
-
-        if allow_image_rounds and category == 'География':
-            if last_round != 'image' and random.random() < 0.18:
-                return 'image'
-
         return 'text'
 
     async def _generate_text_question(
@@ -761,3 +740,125 @@ class LLMQuestionProvider:
             status = getattr(exc, 'status_code', None)
             return bool(status in {429} or (isinstance(status, int) and status >= 500))
         return False
+
+
+    async def generate_question_batch(self, request: dict[str, Any]) -> list[QuestionCandidate]:
+        count = int(request.get('count', 10))
+        category = str(request.get('category', CATEGORY_RANDOM))
+        difficulty = str(request.get('difficulty', 'medium'))
+        mode = str(request.get('mode', 'classic'))
+        llm_only = bool(request.get('llm_only', False))
+        chat_id = int(request.get('chat_id', 0))
+
+        batch: list[QuestionCandidate] = []
+        skipped_non_llm = 0
+        skipped_sources: dict[str, int] = {}
+        recent_keys = set(self.history.recent_keys(chat_id, settings.recent_questions_limit))
+
+        for _ in range(max(1, min(count, 20))):
+            if llm_only:
+                selected_category = self._choose_category(chat_id, category, {})
+                try:
+                    question = await self._generate_text_question(
+                        chat_id=chat_id,
+                        recent_keys=recent_keys,
+                        category=selected_category,
+                        stage='core',
+                        preferred_difficulty=difficulty,
+                    )
+                except Exception as exc:
+                    logger.warning('LLM-only batch item generation failed: %s', type(exc).__name__)
+                    continue
+            else:
+                try:
+                    question = await self.generate_question(
+                        chat_id=chat_id,
+                        used_keys=recent_keys,
+                        preferred_category=category,
+                        stage='core',
+                        preferred_difficulty=difficulty,
+                    )
+                except Exception as exc:
+                    logger.warning('Batch item generation failed: %s', type(exc).__name__)
+                    continue
+
+            if llm_only and question.source != 'llm':
+                skipped_non_llm += 1
+                source = str(question.source or 'unknown')
+                skipped_sources[source] = skipped_sources.get(source, 0) + 1
+                continue
+
+            if question.key:
+                recent_keys.add(question.key)
+
+            candidate = QuestionCandidate(
+                provider_name='openai',
+                model_name=self.model,
+                language=str(request.get('language', 'ru')),
+                topic=question.topic or category,
+                subtopic='',
+                difficulty=question.difficulty,
+                question_type=question.question_type,
+                question_text=question.question,
+                options=[],
+                correct_option_index=None,
+                correct_answer_text=question.answer,
+                explanation=question.explanation,
+                canonical_facts=[question.explanation, question.answer],
+                uniqueness_tags=[question.topic or category],
+                created_for_mode=mode,
+                raw_payload={'hint': question.hint, 'aliases': question.aliases, 'source': question.source},
+            )
+            batch.append(candidate)
+
+        if llm_only and skipped_non_llm > 0:
+            logger.warning(
+                'Skip non-llm questions in llm_only batch generation: skipped=%s, sources=%s',
+                skipped_non_llm,
+                skipped_sources,
+            )
+
+        return self.validate_question_batch(batch)
+
+    def validate_question_batch(self, candidates: list[QuestionCandidate]) -> list[QuestionCandidate]:
+        valid: list[QuestionCandidate] = []
+        for candidate in candidates:
+            candidate.question_text = ' '.join(candidate.question_text.split())
+            candidate.correct_answer_text = ' '.join(candidate.correct_answer_text.split())
+            candidate.topic = (candidate.topic or 'Общее').strip()
+            candidate.subtopic = (candidate.subtopic or '').strip()
+            candidate.explanation = ' '.join((candidate.explanation or '').split())
+            candidate.canonical_facts = [str(item).strip() for item in candidate.canonical_facts if str(item).strip()]
+
+            if not candidate.question_text or len(candidate.question_text) < 8:
+                continue
+            if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+                candidate = self.repair_invalid_question(candidate) or candidate
+            if not candidate.correct_answer_text.strip() or not candidate.explanation.strip():
+                repaired = self.repair_invalid_question(candidate)
+                if repaired is None:
+                    continue
+                candidate = repaired
+
+            candidate.question_hash = self.dedup_service.question_hash(candidate)
+            candidate.uniqueness_hash = self.dedup_service.uniqueness_hash(candidate)
+            valid.append(candidate)
+        return valid
+
+    def repair_invalid_question(self, candidate: QuestionCandidate) -> QuestionCandidate | None:
+        if not candidate.question_text.strip() or not candidate.correct_answer_text.strip():
+            return None
+        if candidate.difficulty not in {'easy', 'medium', 'hard'}:
+            candidate.difficulty = 'medium'
+        if not candidate.explanation.strip():
+            candidate.explanation = 'Короткое объяснение недоступно.'
+        return candidate
+
+    def derive_uniqueness_fingerprint(self, candidate: QuestionCandidate) -> dict[str, Any]:
+        canonical_facts = [str(item).strip().lower() for item in candidate.canonical_facts if str(item).strip()]
+        return {
+            'topic': (candidate.topic or '').strip().lower(),
+            'subtopic': (candidate.subtopic or '').strip().lower(),
+            'canonical_facts': canonical_facts,
+            'answer_normalized': (candidate.correct_answer_text or '').strip().lower(),
+        }

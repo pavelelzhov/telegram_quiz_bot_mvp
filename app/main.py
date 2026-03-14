@@ -21,6 +21,7 @@ async def main() -> None:
 
     question_provider = LLMQuestionProvider()
     game_manager = GameManager(db=db, question_provider=question_provider)
+    asyncio.create_task(game_manager.quiz_engine.ensure_cache_after_restart())
 
     bot = Bot(token=settings.bot_token)
     dp = Dispatcher()

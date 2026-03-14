@@ -8,7 +8,7 @@ from app.core.models import GameState, QuizQuestion
 
 class RoundLifecycleService:
     def source_label(self, question: QuizQuestion) -> str:
-        if question.source == 'llm':
+        if question.source in {'llm', 'llm_cache'}:
             return 'ИИ'
         if question.source == 'image_pool':
             return 'картинка'

@@ -63,6 +63,20 @@ class ChatConfigService:
         cfg.host_mode_enabled = not cfg.host_mode_enabled
         return cfg.host_mode_enabled
 
+
+    def set_timezone(self, chat_id: int, timezone_name: str) -> None:
+        cfg = self.get_chat_settings(chat_id)
+        cfg.timezone = timezone_name
+
+    def set_repeat_rules(self, chat_id: int, repeat_window_days: int, same_day_block: bool) -> None:
+        cfg = self.get_chat_settings(chat_id)
+        cfg.repeat_window_days = max(1, min(30, repeat_window_days))
+        cfg.same_day_repeat_block_enabled = same_day_block
+
+    def set_preferred_topics(self, chat_id: int, topics: list[str]) -> None:
+        cfg = self.get_chat_settings(chat_id)
+        cfg.preferred_topics = [item.strip() for item in topics if item.strip()]
+
     def build_settings_text(self, chat_id: int, profile_label: str) -> str:
         cfg = self.get_chat_settings(chat_id)
         return (
@@ -74,5 +88,10 @@ class ChatConfigService:
             f'Музыка: {"вкл" if cfg.music_rounds_enabled else "выкл"}\n'
             f'Чат-режим: {"вкл" if cfg.chat_mode_enabled else "выкл"}\n'
             f'Host-режим: {"вкл" if cfg.host_mode_enabled else "выкл"}\n'
-            f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}'
+            f'Только админ может старт/стоп: {"вкл" if cfg.admin_only_control else "выкл"}\n'
+            f'Таймзона: {cfg.timezone}\n'
+            f'Адаптивность: {"вкл" if cfg.adaptive_mode_enabled else "выкл"}\n'
+            f'Окно анти-повторов: {cfg.repeat_window_days} дн.\n'
+            f'Запрет повторов в тот же день: {"вкл" if cfg.same_day_repeat_block_enabled else "выкл"}\n'
+            f'LLM-only режим: {"вкл" if cfg.llm_only_mode else "выкл"}'
         )

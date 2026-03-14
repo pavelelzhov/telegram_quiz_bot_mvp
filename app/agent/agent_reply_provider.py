@@ -18,6 +18,21 @@ class AgentReplyProvider:
         )
         self.model = settings.openai_model
 
+
+    def resolve_temperature(self, *, mode: str, sharpness_ceiling: str) -> float:
+        if mode in ('quiz_safe_mode', 'warm_support'):
+            return 0.45
+        if mode in ('micro_reaction', 'initiative_topic_drop'):
+            return 0.75
+        if mode == 'pushback':
+            return 0.65
+
+        if sharpness_ceiling == 'low':
+            return 0.5
+        if sharpness_ceiling == 'high':
+            return 0.9
+        return 0.8
+
     async def generate_reply(
         self,
         chat_title: str,
@@ -78,7 +93,7 @@ class AgentReplyProvider:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
-                temperature=0.8,
+                temperature=self.resolve_temperature(mode=mode, sharpness_ceiling=sharpness_ceiling),
                 messages=[
                     {'role': 'system', 'content': PersonaPolicyService.PERSONA_CORE_PROMPT},
                     {'role': 'user', 'content': prompt},

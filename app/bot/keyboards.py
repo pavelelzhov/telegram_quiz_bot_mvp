@@ -40,6 +40,11 @@ BUTTON_TEXTS = set(BUTTON_TO_CATEGORY.keys()) | {
     '🚀 Старт 2v2',
     '🛑 Стоп 2v2',
     '🩺 Health',
+    '📦 Буфер LLM',
+    '🧠 Solo Start',
+    '📅 Daily',
+    '📈 My Level',
+    '👤 Profile',
 }
 
 
@@ -52,12 +57,14 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
             [KeyboardButton(text='🔬 Наука'), KeyboardButton(text='⚽ Спорт'), KeyboardButton(text='📖 Литература')],
             [KeyboardButton(text='🌐 Интернет'), KeyboardButton(text='🧠 Общие')],
             [KeyboardButton(text='🏅 Сезон'), KeyboardButton(text='🗓 Неделя'), KeyboardButton(text='🕘 Последняя игра')],
-            [KeyboardButton(text='🙋 Профиль')],
+            [KeyboardButton(text='🙋 Профиль'), KeyboardButton(text='👤 Profile'), KeyboardButton(text='📈 My Level')],
+            [KeyboardButton(text='🧠 Solo Start'), KeyboardButton(text='📅 Daily')],
             [KeyboardButton(text='🟥 Team Alpha'), KeyboardButton(text='🟦 Team Beta')],
             [KeyboardButton(text='🤝 Лобби 2v2'), KeyboardButton(text='🚀 Старт 2v2'), KeyboardButton(text='🛑 Стоп 2v2')],
             [KeyboardButton(text='⚙️ Настройки'), KeyboardButton(text='⏱ Таймер')],
             [KeyboardButton(text='🖼 Картинки'), KeyboardButton(text='🎧 Музыка-раунды')],
             [KeyboardButton(text='👮 Админ-режим'), KeyboardButton(text='🤖 Host-режим'), KeyboardButton(text='🩺 Health')],
+            [KeyboardButton(text='📦 Буфер LLM')],
             [KeyboardButton(text='💡 Подсказка'), KeyboardButton(text='⏭ Пропустить')],
             [KeyboardButton(text='🏆 Очки'), KeyboardButton(text='📊 Статус')],
             [KeyboardButton(text='👥 Топ'), KeyboardButton(text='⛔ Стоп')],

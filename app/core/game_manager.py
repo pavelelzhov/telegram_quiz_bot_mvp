@@ -565,7 +565,7 @@ class GameManager:
 
         self.chat_history.mark_reply(chat_id, now)
         if decision.mode == 'initiative_topic_drop':
-            self.participation_decision.mark_initiative(chat_id)
+            self.participation_decision.mark_initiative(chat_id, user_id)
         else:
             self.participation_decision.mark_replied(chat_id)
         self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)

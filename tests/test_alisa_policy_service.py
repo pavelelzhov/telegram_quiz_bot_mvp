@@ -4,8 +4,8 @@ import time
 import unittest
 
 from app.core.alisa_policy import (
-    AddressingPolicyService,
     AddressingDecision,
+    AddressingPolicyService,
     InitiativeService,
     ParticipationDecisionService,
     ReplyValidationService,
@@ -107,7 +107,27 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         self.assertTrue(decision.should_reply)
         self.assertEqual(decision.mode, 'initiative_topic_drop')
 
+    def test_initiative_avoids_same_user_streak_when_chat_is_active(self) -> None:
+        now = time.time()
+        self.service.last_initiative_user_id[7] = 22
+        self.service.same_user_initiative_streak[(7, 22)] = 1
+        decision = self.service.decide(
+            chat_id=7,
+            user_id=22,
+            addressed=AddressingDecision(False, None, ['suppressed_not_addressed']),
+            quiz_active=False,
+            recent_messages=30,
+            recent_unique_users=4,
+            tension_level=0.1,
+            now_ts=now + 20000,
+        )
+        self.assertFalse(decision.should_reply)
+        self.assertIn('suppressed_same_user_initiative_streak', decision.reason_codes)
 
+    def test_mark_initiative_tracks_streak_for_user(self) -> None:
+        self.service.mark_initiative(chat_id=9, user_id=100)
+        self.service.mark_initiative(chat_id=9, user_id=100)
+        self.assertEqual(self.service.same_user_initiative_streak[(9, 100)], 1)
 
 
 class InitiativeServiceTests(unittest.TestCase):
@@ -141,7 +161,6 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertNotIn('suppressed_ai_phrase', reasons)
         self.assertTrue(text)
 
-
     def test_repeated_reply_rewritten(self) -> None:
         text, reasons, rewritten = self.service.validate_and_clamp(
             text='Привет, как дела?',
@@ -163,6 +182,7 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertEqual(text, '')
         self.assertFalse(rewritten)
         self.assertIn('suppressed_repeated_reply', reasons)
+
     def test_length_clamp(self) -> None:
         candidate = 'Очень длинный ответ. ' * 30
         text, reasons, rewritten = self.service.validate_and_clamp(

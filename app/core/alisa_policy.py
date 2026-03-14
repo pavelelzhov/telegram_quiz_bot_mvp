@@ -185,6 +185,8 @@ class ParticipationDecisionService:
     def __init__(self) -> None:
         self.last_reply_ts: dict[int, float] = {}
         self.last_addressed_user_ts: dict[tuple[int, int], float] = {}
+        self.last_initiative_user_id: dict[int, int] = {}
+        self.same_user_initiative_streak: dict[tuple[int, int], int] = {}
         self.initiative_service = InitiativeService()
 
     def decide(
@@ -229,21 +231,47 @@ class ParticipationDecisionService:
                 cooldown,
             )
 
-        return self.initiative_service.can_start(
+        initiative_decision = self.initiative_service.can_start(
             chat_id=chat_id,
             recent_messages=recent_messages,
             recent_unique_users=recent_unique_users,
             tension_level=tension_level,
             now_ts=now,
         )
+        if not initiative_decision.should_reply:
+            return initiative_decision
+
+        last_user = self.last_initiative_user_id.get(chat_id)
+        streak_key = (chat_id, user_id)
+        same_user_streak = self.same_user_initiative_streak.get(streak_key, 0)
+        if last_user == user_id and same_user_streak >= 1 and recent_unique_users >= 3:
+            return ParticipationDecision(
+                False,
+                'observed_silence',
+                ['suppressed_same_user_initiative_streak'],
+                False,
+                None,
+            )
+
+        return initiative_decision
 
     def mark_replied(self, chat_id: int) -> None:
         self.last_reply_ts[chat_id] = time.time()
 
-    def mark_initiative(self, chat_id: int) -> None:
+    def mark_initiative(self, chat_id: int, user_id: int) -> None:
         now = time.time()
         self.last_reply_ts[chat_id] = now
         self.initiative_service.mark(chat_id)
+
+        streak_key = (chat_id, user_id)
+        prev_user = self.last_initiative_user_id.get(chat_id)
+        if prev_user == user_id:
+            self.same_user_initiative_streak[streak_key] = self.same_user_initiative_streak.get(streak_key, 0) + 1
+        else:
+            if prev_user is not None:
+                self.same_user_initiative_streak[(chat_id, prev_user)] = 0
+            self.same_user_initiative_streak[streak_key] = 0
+        self.last_initiative_user_id[chat_id] = user_id
 
 
 class ReplyValidationService:

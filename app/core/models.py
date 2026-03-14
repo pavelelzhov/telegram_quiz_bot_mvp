@@ -71,6 +71,8 @@ class QuestionSelectionContext:
     target_difficulty: str = 'medium'
     repeat_window_days: int = 5
     same_day_repeat_block_enabled: bool = True
+    question_ids_used_in_game: Set[int] = field(default_factory=set)
+    uniqueness_hashes_used_in_game: Set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)

@@ -145,9 +145,9 @@ class QuizEngineService:
             local_game_date=game_state.local_game_date or datetime.now(timezone.utc).date().isoformat(),
             topic_focus=game_state.topic_focus,
             target_difficulty=target_difficulty,
+            question_ids_used_in_game=set(game_state.question_ids_used_in_game),
+            uniqueness_hashes_used_in_game=set(game_state.uniqueness_hashes_used_in_game),
         )
-        setattr(selection_context, 'question_ids_used_in_game', game_state.question_ids_used_in_game)
-        setattr(selection_context, 'uniqueness_hashes_used_in_game', game_state.uniqueness_hashes_used_in_game)
         filtered = await self.filter_repeated_questions(candidates, selection_context)
         filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
         for item in filtered[:needed]:
@@ -257,12 +257,12 @@ class QuizEngineService:
             candidate_id = int(candidate['id'])
             if context.same_day_repeat_block_enabled and candidate_id in chat_qids_today:
                 continue
-            if candidate_id in getattr(context, 'question_ids_used_in_game', set()):
+            if candidate_id in context.question_ids_used_in_game:
                 continue
             uq = str(candidate.get('uniqueness_hash', ''))
             if uq and (uq in chat_seen_uniqueness or uq in player_seen_uniqueness):
                 continue
-            if uq and uq in getattr(context, 'uniqueness_hashes_used_in_game', set()):
+            if uq and uq in context.uniqueness_hashes_used_in_game:
                 continue
             filtered.append(candidate)
         return filtered

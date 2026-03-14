@@ -23,7 +23,7 @@ from app.core.game_status_service import GameStatusService
 from app.core.game_summary_service import GameSummaryService
 from app.core.invite_service import InviteService
 from app.core.invite_orchestration_service import InviteOrchestrationService
-from app.core.models import ChatSettings, GameState, QuizQuestion
+from app.core.models import ChatSettings, GameState, QuestionUsageRecord, QuizQuestion
 from app.core.quiz_engine_service import QuizEngineService
 from app.core.round_lifecycle_service import RoundLifecycleService
 from app.core.team_mode_service import TeamModeService

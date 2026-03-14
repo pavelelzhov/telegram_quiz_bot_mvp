@@ -293,25 +293,27 @@ class Database:
                 )
                 params.extend([chat_id, local_game_date])
 
+            cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=max(1, repeat_window_days))).isoformat()
+
             if chat_id is not None:
                 query += (
                     ' AND uniqueness_hash NOT IN ('
                     'SELECT l.uniqueness_hash FROM question_usage_log q '
                     'JOIN llm_questions l ON l.id = q.question_id '
-                    "WHERE q.chat_id = ? AND q.shown_at >= datetime('now', ?)"
+                    'WHERE q.chat_id = ? AND q.shown_at >= ?'
                     ')'
                 )
-                params.extend([chat_id, f'-{max(1, repeat_window_days)} days'])
+                params.extend([chat_id, cutoff_iso])
 
             if player_id is not None:
                 query += (
                     ' AND uniqueness_hash NOT IN ('
                     'SELECT l.uniqueness_hash FROM question_usage_log q '
                     'JOIN llm_questions l ON l.id = q.question_id '
-                    "WHERE q.player_id = ? AND q.shown_at >= datetime('now', ?)"
+                    'WHERE q.player_id = ? AND q.shown_at >= ?'
                     ')'
                 )
-                params.extend([player_id, f'-{max(1, repeat_window_days)} days'])
+                params.extend([player_id, cutoff_iso])
 
             query += ' ORDER BY quality_score DESC, id DESC LIMIT ?'
             params.append(limit)

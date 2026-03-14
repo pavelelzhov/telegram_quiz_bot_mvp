@@ -27,9 +27,9 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.tmp_dir.cleanup()
 
     def test_detect_mode(self) -> None:
-        self.assertEqual(self.service.detect_mode('мне тревожно и плохо'), 'support')
-        self.assertEqual(self.service.detect_mode('обосри меня как следует'), 'roast')
-        self.assertEqual(self.service.detect_mode('привет, как дела?'), 'chat')
+        self.assertEqual(self.service.detect_mode('мне тревожно и плохо'), 'warm_support')
+        self.assertEqual(self.service.detect_mode('заткнись уже'), 'pushback')
+        self.assertEqual(self.service.detect_mode('привет, как дела?'), 'addressed_reply')
 
     async def test_generate_reply_passes_mode_and_context(self) -> None:
         self.memory_store.note_message(chat_id=1, user_id=10, username='u', text='старое сообщение')
@@ -39,17 +39,18 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
             chat_title='Test Chat',
             user_id=10,
             username='u',
-            text='обосри меня',
-            history=[{'role': 'user', 'speaker': 'u', 'text': 'обосри меня'}],
+            text='заткнись уже',
+            history=[{'role': 'user', 'speaker': 'u', 'text': 'заткнись уже'}],
             quiz_active=False,
             current_question_text=None,
             addressed=True,
+            mode='addressed_reply',
         )
 
         self.assertEqual(reply, 'ok-reply')
         self.assertIsNotNone(self.provider.last_kwargs)
         assert self.provider.last_kwargs is not None
-        self.assertEqual(self.provider.last_kwargs.get('mode'), 'roast')
+        self.assertEqual(self.provider.last_kwargs.get('mode'), 'pushback')
         self.assertEqual(self.provider.last_kwargs.get('chat_title'), 'Test Chat')
 
 

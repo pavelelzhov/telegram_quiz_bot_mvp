@@ -32,6 +32,7 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.detect_mode('привет, как дела?'), 'micro_reaction')
 
         self.assertEqual(self.service.detect_mode('покажи настройки'), 'addressed_reply')
+        self.assertEqual(self.service.detect_mode('депрессивный фильм норм'), 'addressed_reply')
         self.assertEqual(self.service.detect_mode('придурок какой-то'), 'addressed_reply')
 
 

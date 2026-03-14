@@ -26,7 +26,7 @@ class ChatAgentService:
             'мне плохо', 'тревожно', 'паника', 'паническую', 'устал', 'не вывожу',
             'одиноко', 'грустно', 'тяжело', 'накрывает', 'депресс', 'разбит', 'день в мусор'
         ]
-        if any(token in lowered for token in support_tokens):
+        if self._contains_any_token(lowered, support_tokens):
             return 'warm_support'
 
         pushback_tokens = ['заткнись', 'тупая', 'идиотка', 'дура']

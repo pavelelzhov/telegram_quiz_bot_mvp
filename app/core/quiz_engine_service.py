@@ -221,7 +221,11 @@ class QuizEngineService:
                     'llm_only': True,
                 }
             )
-            valid_batch = self.llm_provider.validate_question_batch(batch)
+            validator = getattr(self.llm_provider, 'validate_question_batch', None)
+            if callable(validator):
+                valid_batch = validator(batch)
+            else:
+                valid_batch = batch
             accepted = []
             seen_question_hashes: set[str] = set()
             seen_uniqueness_hashes: set[str] = set()

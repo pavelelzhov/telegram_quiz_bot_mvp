@@ -52,6 +52,16 @@ class ChatAgentService:
                 return True
         return False
 
+
+    def resolve_sharpness_ceiling(self, mode: str) -> str:
+        if mode in ('warm_support', 'quiz_safe_mode'):
+            return 'low'
+        if mode in ('pushback',):
+            return 'medium'
+        if mode in ('micro_reaction', 'initiative_topic_drop'):
+            return 'medium'
+        return 'medium'
+
     async def generate_reply(
         self,
         chat_id: int,
@@ -82,4 +92,5 @@ class ChatAgentService:
             chat_memory=chat_memory,
             mode=final_mode,
             relationship_hint=relationship_hint,
+            sharpness_ceiling=self.resolve_sharpness_ceiling(final_mode),
         )

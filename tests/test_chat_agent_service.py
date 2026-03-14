@@ -36,6 +36,12 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.detect_mode('придурок какой-то'), 'addressed_reply')
 
 
+
+    def test_resolve_sharpness_ceiling(self) -> None:
+        self.assertEqual(self.service.resolve_sharpness_ceiling('warm_support'), 'low')
+        self.assertEqual(self.service.resolve_sharpness_ceiling('quiz_safe_mode'), 'low')
+        self.assertEqual(self.service.resolve_sharpness_ceiling('pushback'), 'medium')
+
     async def test_generate_reply_passes_micro_reaction_mode(self) -> None:
         reply = await self.service.generate_reply(
             chat_id=2,
@@ -54,6 +60,7 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.provider.last_kwargs)
         assert self.provider.last_kwargs is not None
         self.assertEqual(self.provider.last_kwargs.get('mode'), 'micro_reaction')
+        self.assertEqual(self.provider.last_kwargs.get('sharpness_ceiling'), 'medium')
 
     async def test_generate_reply_passes_mode_and_context(self) -> None:
         self.memory_store.note_message(chat_id=1, user_id=10, username='u', text='старое сообщение')
@@ -76,6 +83,7 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         assert self.provider.last_kwargs is not None
         self.assertEqual(self.provider.last_kwargs.get('mode'), 'pushback')
         self.assertEqual(self.provider.last_kwargs.get('chat_title'), 'Test Chat')
+        self.assertEqual(self.provider.last_kwargs.get('sharpness_ceiling'), 'medium')
 
 
 if __name__ == '__main__':

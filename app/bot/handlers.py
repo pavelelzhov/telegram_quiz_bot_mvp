@@ -2,10 +2,12 @@
 
 import asyncio
 import logging
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
+from aiogram.exceptions import TelegramNetworkError
 
 from app.bot.keyboards import (
     BUTTON_TEXTS,
@@ -24,6 +26,7 @@ from app.core.leaderboard_service import LeaderboardService
 from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
+from app.utils.retry import retry_async
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +55,24 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         except Exception:
             return False
 
+    def _should_retry_telegram(exc: Exception) -> bool:
+        return isinstance(exc, TelegramNetworkError)
+
+    async def _safe_answer(message: Message, text: str, **kwargs: object) -> None:
+        try:
+            await retry_async(
+                lambda: message.answer(text, **kwargs),
+                retries=2,
+                base_delay_sec=0.8,
+                should_retry=_should_retry_telegram,
+            )
+        except Exception as exc:
+            logger.warning('message.answer failed after retries chat_id=%s error=%s', message.chat.id, type(exc).__name__)
+
     async def _ensure_admin_for_setting(message: Message) -> bool:
         if await _is_admin(message):
             return True
-        await message.answer('⚠️ Менять настройки чата может только администратор.', reply_markup=main_menu_kb())
+        await _safe_answer(message, '⚠️ Менять настройки чата может только администратор.', reply_markup=main_menu_kb())
         return False
 
     async def _ensure_control_allowed(message: Message) -> bool:
@@ -64,7 +81,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             return True
         if await _is_admin(message):
             return True
-        await message.answer('⚠️ В этом чате запускать и останавливать игру может только администратор.', reply_markup=main_menu_kb())
+        await _safe_answer(message, '⚠️ В этом чате запускать и останавливать игру может только администратор.', reply_markup=main_menu_kb())
         return False
 
     async def _is_addressed_to_bot(message: Message) -> bool:
@@ -81,8 +98,27 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if bot_username and f'@{bot_username}' in text:
             return True
 
-        triggers = ['бот', 'квиз бот', 'квиз-бот', 'ведущий']
-        return any(token in text for token in triggers)
+        aliases = [item.strip().lower() for item in settings.alisa_name_aliases.split(',') if item.strip()]
+        canonical_name = settings.alisa_name.strip().lower()
+        if canonical_name and canonical_name not in aliases:
+            aliases.append(canonical_name)
+        for alias in aliases:
+            if re.search(rf'(?<!\\w){re.escape(alias)}(?!\\w)', text, flags=re.IGNORECASE):
+                return True
+        return False
+
+    async def _addressing_signals(message: Message) -> tuple[bool, bool, bool]:
+        is_reply_to_alisa = bool(
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.id == message.bot.id
+        )
+        has_bot_mention = False
+        if message.text:
+            bot_username = await _get_bot_username(message)
+            has_bot_mention = bool(bot_username and f'@{bot_username}' in message.text.lower())
+        has_name = await _is_addressed_to_bot(message)
+        return is_reply_to_alisa, has_bot_mention, has_name
 
     def _help_text(chat_id: int) -> str:
         return (
@@ -108,11 +144,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def _start_quiz(message: Message, question_limit: int, quiz_mode: str) -> None:
         private_allowed_modes = {'solo_adaptive', 'daily'}
         if message.chat.type == 'private' and quiz_mode not in private_allowed_modes:
-            await message.answer('Этот бот лучше использовать в групповом чате.', reply_markup=main_menu_kb())
+            await _safe_answer(message, 'Этот бот лучше использовать в групповом чате.', reply_markup=main_menu_kb())
             return
 
         if not message.from_user:
-            await message.answer('Не удалось определить пользователя.', reply_markup=main_menu_kb())
+            await _safe_answer(message, 'Не удалось определить пользователя.', reply_markup=main_menu_kb())
             return
 
         if not await _ensure_control_allowed(message):
@@ -126,11 +162,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             quiz_mode=quiz_mode,
         )
         if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+            await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     async def _reply_if_error(message: Message, text: str) -> None:
         if text != 'OK':
-            await message.answer(text, reply_markup=main_menu_kb())
+            await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     def _sender_username(message: Message) -> str | None:
         if not message.from_user:
@@ -139,34 +175,34 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     async def _send_top(message: Message) -> None:
         rows = await db.get_top_players(message.chat.id, limit=10)
-        await message.answer(leaderboard_service.format_chat_top(rows), reply_markup=main_menu_kb())
+        await _safe_answer(message, leaderboard_service.format_chat_top(rows), reply_markup=main_menu_kb())
 
     async def _send_season(message: Message) -> None:
         text = await game_manager.get_season_product_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     async def _send_weekly(message: Message) -> None:
         rows = await db.get_weekly_top_players(message.chat.id, limit=10)
-        await message.answer(leaderboard_service.format_weekly_top(rows), reply_markup=main_menu_kb())
+        await _safe_answer(message, leaderboard_service.format_weekly_top(rows), reply_markup=main_menu_kb())
 
     async def _send_profile(message: Message) -> None:
         username = _sender_username(message)
         if not message.from_user or not username:
             return
         text = await game_manager.get_player_product_text(message.chat.id, message.from_user.id, username)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     async def _send_last_game(message: Message) -> None:
         data = await db.get_last_game_result(message.chat.id)
         text = last_game_service.format_last_game_text(data)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     async def _set_team_and_reply(message: Message, team: str) -> None:
         username = _sender_username(message)
         if not message.from_user or not username:
             return
         text = game_manager.set_team_choice(message.chat.id, message.from_user.id, username, team)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     async def _send_web_search(message: Message, raw_text: str) -> None:
         username = _sender_username(message)
@@ -177,16 +213,16 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             username=username,
             raw_text=raw_text,
         )
-        await message.answer(result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
+        await _safe_answer(message, result, reply_markup=main_menu_kb(), disable_web_page_preview=True)
 
     async def _send_score(message: Message) -> None:
-        await message.answer(game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, game_manager.get_score_text(message.chat.id), reply_markup=main_menu_kb())
 
     async def _send_status(message: Message) -> None:
-        await message.answer(game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, game_manager.get_status_text(message.chat.id), reply_markup=main_menu_kb())
 
     async def _send_settings(message: Message) -> None:
-        await message.answer(game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, game_manager.get_settings_text(message.chat.id), reply_markup=main_menu_kb())
 
     async def _send_hint(message: Message) -> None:
         text = await game_manager.give_hint(message.bot, message.chat.id)
@@ -206,11 +242,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_admin_for_setting(message):
             return
         enabled = toggler(message.chat.id)
-        await message.answer(f'{label}: {"вкл" if enabled else "выкл"}', reply_markup=main_menu_kb())
+        await _safe_answer(message, f'{label}: {"вкл" if enabled else "выкл"}', reply_markup=main_menu_kb())
 
     @router.message(Command('start'))
     async def cmd_start(message: Message) -> None:
-        await message.answer(_help_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, _help_text(message.chat.id), reply_markup=main_menu_kb())
 
     @router.message(Command('season'))
     async def cmd_season(message: Message) -> None:
@@ -255,7 +291,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('team_lobby'))
     async def cmd_team_lobby(message: Message) -> None:
-        await message.answer(game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
 
     @router.message(Command('team_start'))
     async def cmd_team_start(message: Message) -> None:
@@ -273,7 +309,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def cmd_quiz_profile(message: Message, command: CommandObject) -> None:
         if not command.args:
             profile = game_manager.get_game_profile(message.chat.id)
-            await message.answer(
+            await _safe_answer(message, 
                 'Профиль игры: '
                 f'{game_manager.quiz_engine.game_profile_label(profile)}\n'
                 'Изменить: /quiz_profile casual|standard|hardcore',
@@ -286,13 +322,13 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
         profile = command.args.strip().lower()
         if not game_manager.set_game_profile(message.chat.id, profile):
-            await message.answer(
+            await _safe_answer(message, 
                 'Неверный профиль. Используй: casual, standard или hardcore.',
                 reply_markup=main_menu_kb(),
             )
             return
 
-        await message.answer(
+        await _safe_answer(message, 
             'Профиль игры обновлён: '
             f'{game_manager.quiz_engine.game_profile_label(profile)}',
             reply_markup=main_menu_kb(),
@@ -327,7 +363,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('health'))
     async def cmd_health(message: Message) -> None:
         if not await _is_admin(message):
-            await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
+            await _safe_answer(message, '⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
             return
         llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
         web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
@@ -340,7 +376,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             logger=logger,
         )
         text = health_service.format_text(snapshot)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     @router.message(Command('buffer_status'))
     async def cmd_buffer_status(message: Message) -> None:
@@ -355,7 +391,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             )
             await asyncio.sleep(0)
         text = await game_manager.quiz_engine.get_refill_status_text(message.chat.id)
-        await message.answer(text, reply_markup=main_menu_kb())
+        await _safe_answer(message, text, reply_markup=main_menu_kb())
 
     @router.message(F.text == '🎯 Классика 25')
     async def btn_classic(message: Message) -> None:
@@ -363,23 +399,23 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🏠 Главное меню')
     async def btn_home_menu(message: Message) -> None:
-        await message.answer('Открываю главное меню.', reply_markup=main_menu_kb())
+        await _safe_answer(message, 'Открываю главное меню.', reply_markup=main_menu_kb())
 
     @router.message(F.text == '🎮 Игровое меню')
     async def btn_game_menu(message: Message) -> None:
-        await message.answer('Игровой раздел.', reply_markup=game_menu_kb())
+        await _safe_answer(message, 'Игровой раздел.', reply_markup=game_menu_kb())
 
     @router.message(F.text == '🧩 Темы')
     async def btn_topics_menu(message: Message) -> None:
-        await message.answer('Выбери тему вопросов.', reply_markup=topics_menu_kb())
+        await _safe_answer(message, 'Выбери тему вопросов.', reply_markup=topics_menu_kb())
 
     @router.message(F.text == '👤 Профиль и рейтинг')
     async def btn_profile_menu(message: Message) -> None:
-        await message.answer('Профиль и рейтинг.', reply_markup=profile_menu_kb())
+        await _safe_answer(message, 'Профиль и рейтинг.', reply_markup=profile_menu_kb())
 
     @router.message(F.text == '⚙️ Управление')
     async def btn_control_menu(message: Message) -> None:
-        await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
+        await _safe_answer(message, 'Раздел настроек и диагностики.', reply_markup=control_menu_kb())
 
     @router.message(F.text == '🔥 Блиц 7')
     async def btn_blitz(message: Message) -> None:
@@ -415,7 +451,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(F.text == '🤝 Лобби 2v2')
     async def btn_team_lobby(message: Message) -> None:
-        await message.answer(game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
+        await _safe_answer(message, game_manager.get_team_lobby_text(message.chat.id), reply_markup=main_menu_kb())
 
     @router.message(F.text == '🚀 Старт 2v2')
     async def btn_team_start(message: Message) -> None:
@@ -431,7 +467,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         game_manager.set_preferred_category(message.chat.id, category)
         topics = [] if category == 'Случайно' else [category]
         game_manager.chat_config.set_preferred_topics(message.chat.id, topics)
-        await message.answer(
+        await _safe_answer(message, 
             f'🎯 Тема для следующей игры: {category}',
             reply_markup=main_menu_kb(),
         )
@@ -445,7 +481,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not await _ensure_admin_for_setting(message):
             return
         value = game_manager.cycle_timeout(message.chat.id)
-        await message.answer(f'⏱ Новый таймер: {value} сек.', reply_markup=main_menu_kb())
+        await _safe_answer(message, f'⏱ Новый таймер: {value} сек.', reply_markup=main_menu_kb())
 
     @router.message(F.text == '🖼 Картинки')
     async def btn_images(message: Message) -> None:
@@ -499,7 +535,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('solo_start'))
     async def cmd_solo_start(message: Message) -> None:
         if message.chat.type != 'private':
-            await message.answer('Эта команда предназначена для личного режима.')
+            await _safe_answer(message, 'Эта команда предназначена для личного режима.')
             return
         await _start_quiz(message, 7, 'solo_adaptive')
 
@@ -516,7 +552,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if not message.from_user:
             return
         snapshot = await db.get_player_skill_profile(message.from_user.id)
-        await message.answer(
+        await _safe_answer(message, 
             f'🧠 Твой уровень: {snapshot.current_band}\n'
             f'Accuracy: {snapshot.recent_accuracy:.0%}\n'
             f'Текущая серия: {snapshot.current_streak}\n'
@@ -526,7 +562,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('quiz_mode'))
     async def cmd_quiz_mode(message: Message) -> None:
-        await message.answer('Режимы: classic, blitz, epic, team2v2, solo_adaptive, daily', reply_markup=main_menu_kb())
+        await _safe_answer(message, 'Режимы: classic, blitz, epic, team2v2, solo_adaptive, daily', reply_markup=main_menu_kb())
 
     @router.message(Command('quiz_topics'))
     async def cmd_quiz_topics(message: Message, command: CommandObject) -> None:
@@ -534,12 +570,12 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         if command.args:
             topics = [item.strip() for item in command.args.split(',')]
         game_manager.chat_config.set_preferred_topics(message.chat.id, topics)
-        await message.answer(f'Темы обновлены: {", ".join(topics) if topics else "без фокуса"}', reply_markup=main_menu_kb())
+        await _safe_answer(message, f'Темы обновлены: {", ".join(topics) if topics else "без фокуса"}', reply_markup=main_menu_kb())
 
     @router.message(Command('quiz_level_policy'))
     async def cmd_quiz_level_policy(message: Message) -> None:
         cfg = game_manager.get_chat_settings(message.chat.id)
-        await message.answer(f'Adaptive policy: {"on" if cfg.adaptive_mode_enabled else "off"}', reply_markup=main_menu_kb())
+        await _safe_answer(message, f'Adaptive policy: {"on" if cfg.adaptive_mode_enabled else "off"}', reply_markup=main_menu_kb())
 
     @router.message(Command('leaderboard'))
     async def cmd_leaderboard(message: Message) -> None:
@@ -552,16 +588,16 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('quiz_timezone'))
     async def cmd_quiz_timezone(message: Message, command: CommandObject) -> None:
         if not command.args:
-            await message.answer('Использование: /quiz_timezone UTC или /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
+            await _safe_answer(message, 'Использование: /quiz_timezone UTC или /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
             return
         requested_timezone = command.args.strip()
         if game_manager.daily_challenge.is_timezone_supported(requested_timezone):
             game_manager.chat_config.set_timezone(message.chat.id, requested_timezone)
-            await message.answer(f'Таймзона обновлена: {requested_timezone}', reply_markup=main_menu_kb())
+            await _safe_answer(message, f'Таймзона обновлена: {requested_timezone}', reply_markup=main_menu_kb())
             return
 
         game_manager.chat_config.set_timezone(message.chat.id, 'UTC')
-        await message.answer(
+        await _safe_answer(message, 
             'Не удалось применить эту таймзону в текущем окружении. '
             'Поставил UTC как универсальный fallback.',
             reply_markup=main_menu_kb(),
@@ -570,13 +606,18 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(Command('quiz_repeat_rules'))
     async def cmd_quiz_repeat_rules(message: Message, command: CommandObject) -> None:
         days = 5
-        if command.args:
+        raw_args = (command.args or '').strip()
+        if not raw_args and message.text:
+            parts = message.text.split(maxsplit=1)
+            if len(parts) > 1:
+                raw_args = parts[1].strip()
+        if raw_args:
             try:
-                days = int(command.args.strip())
+                days = int(raw_args)
             except ValueError:
                 days = 5
         game_manager.chat_config.set_repeat_rules(message.chat.id, days, True)
-        await message.answer(f'Окно анти-повторов: {days} дней', reply_markup=main_menu_kb())
+        await _safe_answer(message, f'Окно анти-повторов: {days} дней', reply_markup=main_menu_kb())
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:
@@ -589,7 +630,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         username = _sender_username(message)
         if not username:
             return
-        addressed = await _is_addressed_to_bot(message)
+        is_reply_to_alisa, has_bot_mention, has_name = await _addressing_signals(message)
+        addressed = is_reply_to_alisa or has_bot_mention or has_name
 
         if web_search.looks_like_web_request(message.text, addressed=addressed):
             await _send_web_search(message, message.text)
@@ -612,7 +654,9 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             user_id=message.from_user.id,
             username=username,
             text=message.text,
-            addressed=addressed,
+            is_reply_to_alisa=is_reply_to_alisa,
+            has_bot_mention=has_bot_mention,
+            message_id=message.message_id,
         )
 
     return router

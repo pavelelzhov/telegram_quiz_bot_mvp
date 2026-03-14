@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional
+from datetime import datetime, timezone
+from typing import Optional
 
 from app.core.models import (
     ChatSettings,
     GameState,
-    PlayerSkillSnapshot,
     QuestionSelectionContext,
     QuizQuestion,
 )
@@ -139,7 +138,10 @@ class QuizEngineService:
             topic_focus=game_state.topic_focus,
             target_difficulty=target_difficulty,
         )
+        setattr(selection_context, 'question_ids_used_in_game', game_state.question_ids_used_in_game)
+        setattr(selection_context, 'uniqueness_hashes_used_in_game', game_state.uniqueness_hashes_used_in_game)
         filtered = await self.filter_repeated_questions(candidates, selection_context)
+        filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
         for item in filtered[:needed]:
             game_state.question_buffer.append(
                 QuizQuestion(
@@ -208,10 +210,15 @@ class QuizEngineService:
 
         filtered = []
         for candidate in candidates:
-            if context.same_day_repeat_block_enabled and int(candidate['id']) in chat_qids_today:
+            candidate_id = int(candidate['id'])
+            if context.same_day_repeat_block_enabled and candidate_id in chat_qids_today:
+                continue
+            if candidate_id in getattr(context, 'question_ids_used_in_game', set()):
                 continue
             uq = str(candidate.get('uniqueness_hash', ''))
             if uq and (uq in chat_seen_uniqueness or uq in player_seen_uniqueness):
+                continue
+            if uq and uq in getattr(context, 'uniqueness_hashes_used_in_game', set()):
                 continue
             filtered.append(candidate)
         return filtered

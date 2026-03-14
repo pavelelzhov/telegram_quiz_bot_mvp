@@ -37,6 +37,15 @@ class LlmQuizDbTests(unittest.TestCase):
                 inserted = await db.save_generated_questions(batch)
                 self.assertEqual(inserted, 1)
 
+
+                import aiosqlite
+                async with aiosqlite.connect(path) as conn:
+                    async with conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='llm_questions'") as cur:
+                        idx_rows = await cur.fetchall()
+                idx_names = {row[0] for row in idx_rows}
+                self.assertIn('idx_llm_questions_question_hash', idx_names)
+                self.assertIn('idx_llm_questions_uniqueness_hash', idx_names)
+
                 candidates = await db.get_candidate_questions('medium', limit=5)
                 self.assertGreaterEqual(len(candidates), 1)
 

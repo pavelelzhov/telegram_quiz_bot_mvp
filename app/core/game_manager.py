@@ -491,6 +491,10 @@ class GameManager:
         state.near_miss_user_ids = set()
         state.wrong_reply_user_ids = set()
         state.used_question_keys.add(question.key)
+        if question.question_id is not None:
+            state.question_ids_used_in_game.add(question.question_id)
+        if question.uniqueness_hash:
+            state.uniqueness_hashes_used_in_game.add(question.uniqueness_hash)
         self.recent_question_keys[chat_id].append(question.key)
         state.asked_count += 1
 

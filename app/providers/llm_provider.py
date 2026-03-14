@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.core.models import QuestionCandidate, QuizQuestion
+from app.core.question_dedup_service import QuestionDedupService
 from app.quiz.history_store import QuizHistoryStore
 from app.utils.ops_log import log_operation
 from app.utils.retry import retry_async
@@ -118,6 +119,7 @@ class LLMQuestionProvider:
         self.history = QuizHistoryStore()
         self.music_rounds = self._load_music_rounds()
         self.semantic_repeat_stats: dict[int, dict[str, float]] = {}
+        self.dedup_service = QuestionDedupService()
 
     async def generate_question(
         self,
@@ -800,12 +802,25 @@ class LLMQuestionProvider:
     def validate_question_batch(self, candidates: list[QuestionCandidate]) -> list[QuestionCandidate]:
         valid: list[QuestionCandidate] = []
         for candidate in candidates:
-            if not candidate.question_text or len(candidate.question_text.strip()) < 8:
+            candidate.question_text = ' '.join(candidate.question_text.split())
+            candidate.correct_answer_text = ' '.join(candidate.correct_answer_text.split())
+            candidate.topic = (candidate.topic or 'Общее').strip()
+            candidate.subtopic = (candidate.subtopic or '').strip()
+            candidate.explanation = ' '.join((candidate.explanation or '').split())
+            candidate.canonical_facts = [str(item).strip() for item in candidate.canonical_facts if str(item).strip()]
+
+            if not candidate.question_text or len(candidate.question_text) < 8:
                 continue
             if candidate.difficulty not in {'easy', 'medium', 'hard'}:
-                continue
+                candidate = self.repair_invalid_question(candidate) or candidate
             if not candidate.correct_answer_text.strip() or not candidate.explanation.strip():
-                continue
+                repaired = self.repair_invalid_question(candidate)
+                if repaired is None:
+                    continue
+                candidate = repaired
+
+            candidate.question_hash = self.dedup_service.question_hash(candidate)
+            candidate.uniqueness_hash = self.dedup_service.uniqueness_hash(candidate)
             valid.append(candidate)
         return valid
 

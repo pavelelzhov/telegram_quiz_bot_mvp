@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -225,12 +226,12 @@ class Database:
                         item.difficulty,
                         item.question_type,
                         item.question_text,
-                        str(item.options),
+                        json.dumps(item.options, ensure_ascii=False),
                         item.correct_option_index,
                         item.correct_answer_text,
                         item.explanation,
-                        str(item.canonical_facts),
-                        str(item.uniqueness_tags),
+                        json.dumps(item.canonical_facts, ensure_ascii=False),
+                        json.dumps(item.uniqueness_tags, ensure_ascii=False),
                         item.question_hash,
                         item.uniqueness_hash,
                         item.quality_score,
@@ -268,7 +269,23 @@ class Database:
             params.append(limit)
             async with db.execute(query, tuple(params)) as cursor:
                 rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        result: List[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item['options'] = json.loads(item.get('options_json') or '[]')
+            except Exception:
+                item['options'] = []
+            try:
+                item['canonical_facts'] = json.loads(item.get('canonical_facts_json') or '[]')
+            except Exception:
+                item['canonical_facts'] = []
+            try:
+                item['uniqueness_tags'] = json.loads(item.get('uniqueness_tags_json') or '[]')
+            except Exception:
+                item['uniqueness_tags'] = []
+            result.append(item)
+        return result
 
     async def log_question_usage(self, record: QuestionUsageRecord) -> None:
         async with aiosqlite.connect(self.path) as db:
@@ -299,7 +316,7 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                'SELECT * FROM question_usage_log WHERE chat_id = ? AND shown_at >= ?',
+                'SELECT q.*, l.uniqueness_hash, l.question_hash FROM question_usage_log q JOIN llm_questions l ON l.id = q.question_id WHERE q.chat_id = ? AND q.shown_at >= ?',
                 (chat_id, cutoff),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -310,7 +327,7 @@ class Database:
         async with aiosqlite.connect(self.path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                'SELECT * FROM question_usage_log WHERE player_id = ? AND shown_at >= ?',
+                'SELECT q.*, l.uniqueness_hash, l.question_hash FROM question_usage_log q JOIN llm_questions l ON l.id = q.question_id WHERE q.player_id = ? AND q.shown_at >= ?',
                 (player_id, cutoff),
             ) as cursor:
                 rows = await cursor.fetchall()

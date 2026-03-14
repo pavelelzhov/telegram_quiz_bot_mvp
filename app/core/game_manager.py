@@ -457,30 +457,23 @@ class GameManager:
             await self._finalize_game(bot, chat_id)
             return
 
-        cfg = self.get_chat_settings(chat_id)
-        used_keys = set(state.used_question_keys)
-        used_keys.update(self.recent_question_keys.get(chat_id, []))
-
         next_number = state.asked_count + 1
         stage = self._determine_stage(state, next_number)
-        target_difficulty = self.adaptive_difficulty.target_difficulty(chat_id, state.asked_count)
 
         try:
             await self.quiz_engine.prepare_question_buffer(state, list(state.scores.keys()))
             question = await self.quiz_engine.select_next_question(state)
             if question is None:
-                question = await self.question_provider.generate_question(
-                    chat_id=chat_id,
-                    used_keys=used_keys,
-                    preferred_category=state.preferred_category,
-                    allow_image_rounds=cfg.image_rounds_enabled,
-                    allow_music_rounds=cfg.music_rounds_enabled,
-                    stage=stage,
-                    preferred_difficulty=target_difficulty,
-                )
+                await self.quiz_engine.request_generation_if_buffer_low(state)
+                question = await self.quiz_engine.select_next_question(state)
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
             await bot.send_message(chat_id, 'Не удалось получить вопрос из LLM-кэша. Попробуйте ещё раз через минуту.')
+            await self._finalize_game(bot, chat_id)
+            return
+
+        if question is None:
+            await bot.send_message(chat_id, 'Сейчас нет готовых LLM-вопросов в кэше. Попробуйте запустить игру чуть позже.')
             await self._finalize_game(bot, chat_id)
             return
 

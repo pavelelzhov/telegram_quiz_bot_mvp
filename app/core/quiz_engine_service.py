@@ -118,16 +118,41 @@ class QuizEngineService:
     async def prepare_question_buffer(self, game_state: GameState, participants: list[int]) -> None:
         if len(game_state.question_buffer) >= 5:
             return
-        await self.ensure_minimum_buffer(game_state)
+        target_difficulty = await self._resolve_target_difficulty(game_state, participants)
+        await self.ensure_minimum_buffer(game_state, target_difficulty=target_difficulty)
 
-    async def ensure_minimum_buffer(self, game_state: GameState) -> None:
+    async def _resolve_target_difficulty(self, game_state: GameState, participants: list[int]) -> str:
+        if self.db is None or not game_state.adaptive_enabled:
+            return 'medium'
+
+        candidate_ids = [item for item in participants if item > 0]
+        if not candidate_ids:
+            candidate_ids = [game_state.started_by_user_id]
+
+        band_to_weight = {'easy': 0, 'medium': 1, 'hard': 2}
+        weights: list[int] = []
+        for player_id in candidate_ids[:5]:
+            snapshot = await self.db.get_player_skill_profile(player_id)
+            weights.append(band_to_weight.get(snapshot.current_band, 1))
+            game_state.target_difficulty_by_player[player_id] = snapshot.current_band
+
+        if not weights:
+            return 'medium'
+
+        avg = sum(weights) / len(weights)
+        if avg >= 1.5:
+            return 'hard'
+        if avg <= 0.5:
+            return 'easy'
+        return 'medium'
+
+    async def ensure_minimum_buffer(self, game_state: GameState, target_difficulty: str = 'medium') -> None:
         if self.db is None:
             return
         needed = max(0, 10 - len(game_state.question_buffer))
         if needed == 0:
             return
 
-        target_difficulty = 'medium'
         candidates = await self.db.get_candidate_questions(
             difficulty=target_difficulty,
             limit=max(needed, 5),
@@ -174,7 +199,8 @@ class QuizEngineService:
 
     async def select_next_question(self, game_state: GameState, player_id: int | None = None) -> QuizQuestion | None:
         if not game_state.question_buffer:
-            await self.ensure_minimum_buffer(game_state)
+            fallback_target = game_state.target_difficulty_by_player.get(game_state.started_by_user_id, 'medium')
+            await self.ensure_minimum_buffer(game_state, target_difficulty=fallback_target)
         if not game_state.question_buffer:
             return None
         return game_state.question_buffer.pop(0)

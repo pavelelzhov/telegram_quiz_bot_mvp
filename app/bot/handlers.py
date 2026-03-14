@@ -6,7 +6,15 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.keyboards import BUTTON_TEXTS, BUTTON_TO_CATEGORY, main_menu_kb
+from app.bot.keyboards import (
+    BUTTON_TEXTS,
+    BUTTON_TO_CATEGORY,
+    control_menu_kb,
+    game_menu_kb,
+    main_menu_kb,
+    profile_menu_kb,
+    topics_menu_kb,
+)
 from app.config import settings
 from app.core.game_manager import GameManager
 from app.core.health_service import HealthService
@@ -15,46 +23,6 @@ from app.core.leaderboard_service import LeaderboardService
 from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +105,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         )
 
     async def _start_quiz(message: Message, question_limit: int, quiz_mode: str) -> None:
-        if message.chat.type == 'private':
+        private_allowed_modes = {'solo_adaptive', 'daily'}
+        if message.chat.type == 'private' and quiz_mode not in private_allowed_modes:
             await message.answer('Этот бот лучше использовать в групповом чате.', reply_markup=main_menu_kb())
             return
 
@@ -356,41 +325,11 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('health'))
     async def cmd_health(message: Message) -> None:
-        started = time.perf_counter()
         if not await _is_admin(message):
             await message.answer('⚠️ Команда /health доступна только администратору.', reply_markup=main_menu_kb())
             return
         llm_configured = bool(settings.openai_api_key and settings.openai_model and settings.openai_base_url)
-        llm_ms = (time.perf_counter() - llm_started) * 1000
-
-        web_started = time.perf_counter()
         web_search_enabled = bool(settings.yandex_search_api_key and settings.yandex_search_folder_id)
-        web_ms = (time.perf_counter() - web_started) * 1000
-
-        db_status = 'OK' if db_ok else 'FAIL'
-        llm_status = 'OK' if llm_configured else 'DEGRADED'
-        web_status = 'OK' if web_search_enabled else 'DEGRADED'
-        overall = 'OK'
-        if not db_ok:
-            overall = 'FAIL'
-        elif not llm_configured or not web_search_enabled:
-            overall = 'DEGRADED'
-
-        log_operation(
-            logger,
-            operation='health_check',
-            chat_id=message.chat.id,
-            result=overall.lower(),
-            duration_ms=(time.perf_counter() - started) * 1000,
-            extra={
-                'db_status': db_status,
-                'db_latency_ms': f'{db_ms:.1f}',
-                'llm_status': llm_status,
-                'llm_latency_ms': f'{llm_ms:.1f}',
-                'web_status': web_status,
-                'web_latency_ms': f'{web_ms:.1f}',
-            },
-        )
 
         snapshot = await health_service.check(
             chat_id=message.chat.id,
@@ -402,9 +341,34 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         text = health_service.format_text(snapshot)
         await message.answer(text, reply_markup=main_menu_kb())
 
+    @router.message(Command('buffer_status'))
+    async def cmd_buffer_status(message: Message) -> None:
+        text = await game_manager.quiz_engine.get_refill_status_text(message.chat.id)
+        await message.answer(text, reply_markup=main_menu_kb())
+
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
         await _start_quiz(message, 10, 'classic')
+
+    @router.message(F.text == '🏠 Главное меню')
+    async def btn_home_menu(message: Message) -> None:
+        await message.answer('Открываю главное меню.', reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🎮 Игровое меню')
+    async def btn_game_menu(message: Message) -> None:
+        await message.answer('Игровой раздел.', reply_markup=game_menu_kb())
+
+    @router.message(F.text == '🧩 Темы')
+    async def btn_topics_menu(message: Message) -> None:
+        await message.answer('Выбери тему вопросов.', reply_markup=topics_menu_kb())
+
+    @router.message(F.text == '👤 Профиль и рейтинг')
+    async def btn_profile_menu(message: Message) -> None:
+        await message.answer('Профиль и рейтинг.', reply_markup=profile_menu_kb())
+
+    @router.message(F.text == '⚙️ Управление')
+    async def btn_control_menu(message: Message) -> None:
+        await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
 
     @router.message(F.text == '🔥 Блиц 7')
     async def btn_blitz(message: Message) -> None:
@@ -490,6 +454,10 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     async def btn_health(message: Message) -> None:
         await cmd_health(message)
 
+    @router.message(F.text == '📦 Буфер LLM')
+    async def btn_buffer_status(message: Message) -> None:
+        await cmd_buffer_status(message)
+
     @router.message(F.text == '💡 Подсказка')
     async def btn_hint(message: Message) -> None:
         await _send_hint(message)
@@ -513,6 +481,89 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '⛔ Стоп')
     async def btn_stop(message: Message) -> None:
         await _stop_quiz(message, 'Игра остановлена кнопкой.')
+
+
+    @router.message(Command('solo_start'))
+    async def cmd_solo_start(message: Message) -> None:
+        if message.chat.type != 'private':
+            await message.answer('Эта команда предназначена для личного режима.')
+            return
+        await _start_quiz(message, 7, 'solo_adaptive')
+
+    @router.message(Command('daily'))
+    async def cmd_daily(message: Message) -> None:
+        await _start_quiz(message, 5, 'daily')
+
+    @router.message(Command('profile'))
+    async def cmd_profile(message: Message) -> None:
+        await _send_profile(message)
+
+    @router.message(Command('my_level'))
+    async def cmd_my_level(message: Message) -> None:
+        if not message.from_user:
+            return
+        snapshot = await db.get_player_skill_profile(message.from_user.id)
+        await message.answer(
+            f'🧠 Твой уровень: {snapshot.current_band}\n'
+            f'Accuracy: {snapshot.recent_accuracy:.0%}\n'
+            f'Текущая серия: {snapshot.current_streak}\n'
+            f'Лучшая серия: {snapshot.best_streak}',
+            reply_markup=main_menu_kb(),
+        )
+
+    @router.message(Command('quiz_mode'))
+    async def cmd_quiz_mode(message: Message) -> None:
+        await message.answer('Режимы: classic, blitz, epic, team2v2, solo_adaptive, daily', reply_markup=main_menu_kb())
+
+    @router.message(Command('quiz_topics'))
+    async def cmd_quiz_topics(message: Message, command: CommandObject) -> None:
+        topics = []
+        if command.args:
+            topics = [item.strip() for item in command.args.split(',')]
+        game_manager.chat_config.set_preferred_topics(message.chat.id, topics)
+        await message.answer(f'Темы обновлены: {", ".join(topics) if topics else "без фокуса"}', reply_markup=main_menu_kb())
+
+    @router.message(Command('quiz_level_policy'))
+    async def cmd_quiz_level_policy(message: Message) -> None:
+        cfg = game_manager.get_chat_settings(message.chat.id)
+        await message.answer(f'Adaptive policy: {"on" if cfg.adaptive_mode_enabled else "off"}', reply_markup=main_menu_kb())
+
+    @router.message(Command('leaderboard'))
+    async def cmd_leaderboard(message: Message) -> None:
+        await _send_top(message)
+
+    @router.message(Command('quiz_settings'))
+    async def cmd_quiz_settings(message: Message) -> None:
+        await _send_settings(message)
+
+    @router.message(Command('quiz_timezone'))
+    async def cmd_quiz_timezone(message: Message, command: CommandObject) -> None:
+        if not command.args:
+            await message.answer('Использование: /quiz_timezone UTC или /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
+            return
+        requested_timezone = command.args.strip()
+        if game_manager.daily_challenge.is_timezone_supported(requested_timezone):
+            game_manager.chat_config.set_timezone(message.chat.id, requested_timezone)
+            await message.answer(f'Таймзона обновлена: {requested_timezone}', reply_markup=main_menu_kb())
+            return
+
+        game_manager.chat_config.set_timezone(message.chat.id, 'UTC')
+        await message.answer(
+            'Не удалось применить эту таймзону в текущем окружении. '
+            'Поставил UTC как универсальный fallback.',
+            reply_markup=main_menu_kb(),
+        )
+
+    @router.message(Command('quiz_repeat_rules'))
+    async def cmd_quiz_repeat_rules(message: Message, command: CommandObject) -> None:
+        days = 5
+        if command.args:
+            try:
+                days = int(command.args.strip())
+            except ValueError:
+                days = 5
+        game_manager.chat_config.set_repeat_rules(message.chat.id, days, True)
+        await message.answer(f'Окно анти-повторов: {days} дней', reply_markup=main_menu_kb())
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:

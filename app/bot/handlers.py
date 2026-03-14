@@ -6,7 +6,15 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import Message
 
-from app.bot.keyboards import BUTTON_TEXTS, BUTTON_TO_CATEGORY, main_menu_kb
+from app.bot.keyboards import (
+    BUTTON_TEXTS,
+    BUTTON_TO_CATEGORY,
+    control_menu_kb,
+    game_menu_kb,
+    main_menu_kb,
+    profile_menu_kb,
+    topics_menu_kb,
+)
 from app.config import settings
 from app.core.game_manager import GameManager
 from app.core.health_service import HealthService
@@ -341,6 +349,26 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '🎯 Классика 10')
     async def btn_classic(message: Message) -> None:
         await _start_quiz(message, 10, 'classic')
+
+    @router.message(F.text == '🏠 Главное меню')
+    async def btn_home_menu(message: Message) -> None:
+        await message.answer('Открываю главное меню.', reply_markup=main_menu_kb())
+
+    @router.message(F.text == '🎮 Игровое меню')
+    async def btn_game_menu(message: Message) -> None:
+        await message.answer('Игровой раздел.', reply_markup=game_menu_kb())
+
+    @router.message(F.text == '🧩 Темы')
+    async def btn_topics_menu(message: Message) -> None:
+        await message.answer('Выбери тему вопросов.', reply_markup=topics_menu_kb())
+
+    @router.message(F.text == '👤 Профиль и рейтинг')
+    async def btn_profile_menu(message: Message) -> None:
+        await message.answer('Профиль и рейтинг.', reply_markup=profile_menu_kb())
+
+    @router.message(F.text == '⚙️ Управление')
+    async def btn_control_menu(message: Message) -> None:
+        await message.answer('Раздел настроек и диагностики.', reply_markup=control_menu_kb())
 
     @router.message(F.text == '🔥 Блиц 7')
     async def btn_blitz(message: Message) -> None:

@@ -16,46 +16,6 @@ from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
 
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -137,7 +97,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         )
 
     async def _start_quiz(message: Message, question_limit: int, quiz_mode: str) -> None:
-        if message.chat.type == 'private':
+        private_allowed_modes = {'solo_adaptive', 'daily'}
+        if message.chat.type == 'private' and quiz_mode not in private_allowed_modes:
             await message.answer('Этот бот лучше использовать в групповом чате.', reply_markup=main_menu_kb())
             return
 

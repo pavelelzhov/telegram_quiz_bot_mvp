@@ -200,22 +200,17 @@ class LLMQuestionProvider:
             return question
         except Exception as exc:
             logger.exception('LLM question generation failed: %s', exc)
-            fallback = self._pick_text_fallback_question(chat_id, recent_keys, category)
-            fallback['key'] = self._question_key(fallback['question'], fallback['answer'])
-            question = QuizQuestion(**fallback, source='fallback')
-            self._apply_stage_profile(question, stage)
-            self._remember_question(chat_id, question)
             log_operation(
                 logger,
                 operation='question_generate',
                 chat_id=chat_id,
-                result='fallback',
+                result='llm_failed',
                 duration_ms=(time.perf_counter() - started) * 1000,
                 error_type=type(exc).__name__,
-                extra={'source': question.source, 'round_type': question.question_type, 'stage': stage},
-                level=logging.WARNING,
+                extra={'round_type': round_type, 'stage': stage},
+                level=logging.ERROR,
             )
-            return question
+            raise
 
     def _apply_stage_profile(self, question: QuizQuestion, stage: str) -> None:
         if stage == 'warmup':
@@ -775,13 +770,17 @@ class LLMQuestionProvider:
                     logger.warning('LLM-only batch item generation failed: %s', type(exc).__name__)
                     continue
             else:
-                question = await self.generate_question(
-                    chat_id=chat_id,
-                    used_keys=recent_keys,
-                    preferred_category=category,
-                    stage='core',
-                    preferred_difficulty=difficulty,
-                )
+                try:
+                    question = await self.generate_question(
+                        chat_id=chat_id,
+                        used_keys=recent_keys,
+                        preferred_category=category,
+                        stage='core',
+                        preferred_difficulty=difficulty,
+                    )
+                except Exception as exc:
+                    logger.warning('Batch item generation failed: %s', type(exc).__name__)
+                    continue
 
             if llm_only and question.source != 'llm':
                 skipped_non_llm += 1

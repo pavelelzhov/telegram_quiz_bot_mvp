@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 import unittest
 
 os.environ.setdefault('BOT_TOKEN', 'test-token')
@@ -54,9 +55,12 @@ class _BatchProvider:
 
 
 class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
+    def _build_db_path(self, tmp_dir: str) -> str:
+        return str(Path(tmp_dir) / 'interaction_flow.db')
+
     async def test_correct_answer_moves_to_next_question(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
-            db = Database(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(self._build_db_path(tmp_dir))
             await db.init()
             manager = GameManager(db=db, question_provider=_BatchProvider())
             bot = _DummyBot()
@@ -92,8 +96,8 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(state.scores), 1)
 
     async def test_three_unique_wrong_answers_force_next_question(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
-            db = Database(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(self._build_db_path(tmp_dir))
             await db.init()
             manager = GameManager(db=db, question_provider=_BatchProvider())
             bot = _DummyBot()
@@ -120,8 +124,8 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(state.current_question.question, first_question_text)
 
     async def test_three_wrong_attempts_from_same_user_force_next_question(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix='.db') as tmp:
-            db = Database(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(self._build_db_path(tmp_dir))
             await db.init()
             manager = GameManager(db=db, question_provider=_BatchProvider())
             bot = _DummyBot()

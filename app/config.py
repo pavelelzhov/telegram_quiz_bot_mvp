@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     question_timeout_sec: int = 30
     max_hints_per_question: int = 1
-    default_question_count: int = 10
+    default_question_count: int = 25
     recent_questions_limit: int = 100
     log_level: str = 'INFO'
 

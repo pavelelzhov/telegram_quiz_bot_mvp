@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -343,6 +344,16 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
 
     @router.message(Command('buffer_status'))
     async def cmd_buffer_status(message: Message) -> None:
+        cache_size = await db.get_valid_llm_questions_count()
+        if cache_size < game_manager.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+            asyncio.create_task(
+                game_manager.quiz_engine.maybe_start_background_cache_refill(
+                    chat_id=message.chat.id,
+                    quiz_mode='classic',
+                    preferred_category=game_manager.get_preferred_category(message.chat.id),
+                )
+            )
+            await asyncio.sleep(0)
         text = await game_manager.quiz_engine.get_refill_status_text(message.chat.id)
         await message.answer(text, reply_markup=main_menu_kb())
 

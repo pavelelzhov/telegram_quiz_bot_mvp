@@ -155,6 +155,7 @@ class GameState:
     hints_used_for_current_question: int = 0
     near_miss_user_ids: Set[int] = field(default_factory=set)
     wrong_reply_user_ids: Set[int] = field(default_factory=set)
+    wrong_attempts_count: int = 0
     last_correct_user_id: Optional[int] = None
     correct_streak_count: int = 0
     is_active: bool = True

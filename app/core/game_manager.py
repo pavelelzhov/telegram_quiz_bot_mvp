@@ -406,12 +406,11 @@ class GameManager:
         text: str,
         is_reply_to_alisa: bool,
         has_bot_mention: bool,
+        message_id: int | None = None,
     ) -> bool:
         cfg = self.get_chat_settings(chat_id)
         if not cfg.chat_mode_enabled:
             return False
-
-        message_id = None
 
         addressing = self.addressing_policy.evaluate(
             text=text,
@@ -533,10 +532,16 @@ class GameManager:
             )
             return False
 
+        recent_assistant_texts = [
+            item.get('text', '')
+            for item in self.chat_history.get_history(chat_id)
+            if item.get('role') == 'assistant'
+        ]
         validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
             text=reply,
             mode=mode,
             quiz_active=quiz_active,
+            recent_assistant_texts=recent_assistant_texts,
         )
         if not validated_reply:
             self.decision_audit.record(
@@ -550,20 +555,6 @@ class GameManager:
                     message_id=message_id,
                 )
             )
-            logger.debug(
-                'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
-                chat_id,
-                user_id,
-                validation_reasons,
-            )
-            return False
-
-        validated_reply, validation_reasons, rewritten = self.reply_validator.validate_and_clamp(
-            text=reply,
-            mode=mode,
-            quiz_active=quiz_active,
-        )
-        if not validated_reply:
             logger.debug(
                 'Alisa suppressed by validator chat_id=%s user_id=%s reasons=%s',
                 chat_id,

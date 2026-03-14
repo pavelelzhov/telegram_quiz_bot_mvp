@@ -656,6 +656,7 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
             text=message.text,
             is_reply_to_alisa=is_reply_to_alisa,
             has_bot_mention=has_bot_mention,
+            message_id=message.message_id,
         )
 
     return router

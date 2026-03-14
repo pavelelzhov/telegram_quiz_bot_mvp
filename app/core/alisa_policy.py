@@ -247,7 +247,14 @@ class ParticipationDecisionService:
 
 
 class ReplyValidationService:
-    def validate_and_clamp(self, *, text: str, mode: str, quiz_active: bool) -> tuple[str, list[str], bool]:
+    def validate_and_clamp(
+        self,
+        *,
+        text: str,
+        mode: str,
+        quiz_active: bool,
+        recent_assistant_texts: list[str] | None = None,
+    ) -> tuple[str, list[str], bool]:
         value = (text or '').strip()
         if not value:
             return '', ['suppressed_empty_reply'], False
@@ -282,6 +289,17 @@ class ReplyValidationService:
         if quiz_active and any(token in lowered for token in ('правильный ответ', 'ответ:', 'это точно')):
             return 'Я тебе сейчас не помощница. Играй честно.', ['suppressed_quiz_spoiler_risk', 'safe_rewrite'], True
 
+        if recent_assistant_texts:
+            normalized_reply = self._normalize_for_repeat_check(value)
+            normalized_recent = {self._normalize_for_repeat_check(item) for item in recent_assistant_texts if item}
+            if normalized_reply and normalized_reply in normalized_recent:
+                fallback = self._rewrite_duplicate_reply(value, mode)
+                if self._normalize_for_repeat_check(fallback) in normalized_recent:
+                    return '', ['suppressed_repeated_reply'], rewritten
+                value = fallback
+                reasons.append('rewritten_repeated_reply')
+                rewritten = True
+
         return value, reasons, rewritten
 
     def _contains_banned_pattern(self, text: str) -> bool:
@@ -302,3 +320,18 @@ class ReplyValidationService:
 
         rewritten = re.sub(r'\s{2,}', ' ', rewritten).strip(' ,')
         return rewritten
+
+    def _normalize_for_repeat_check(self, text: str) -> str:
+        value = re.sub(r'\s+', ' ', (text or '').strip().lower())
+        value = re.sub(r'[.!?…,:;]+$', '', value)
+        return value
+
+    def _rewrite_duplicate_reply(self, text: str, mode: str) -> str:
+        base = text.strip()
+        if mode == 'warm_support':
+            return f'Я рядом. {base}'
+        if mode == 'initiative_topic_drop':
+            if len(base) > 1:
+                return f'Кстати, {base[:1].lower() + base[1:]}'
+            return f'Кстати, {base.lower()}'
+        return f'Скажу короче: {base}'

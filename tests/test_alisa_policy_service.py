@@ -141,6 +141,28 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertNotIn('suppressed_ai_phrase', reasons)
         self.assertTrue(text)
 
+
+    def test_repeated_reply_rewritten(self) -> None:
+        text, reasons, rewritten = self.service.validate_and_clamp(
+            text='Привет, как дела?',
+            mode='addressed_reply',
+            quiz_active=False,
+            recent_assistant_texts=['Привет, как дела?'],
+        )
+        self.assertTrue(text)
+        self.assertTrue(rewritten)
+        self.assertIn('rewritten_repeated_reply', reasons)
+
+    def test_repeated_reply_suppressed_when_rewrite_still_duplicate(self) -> None:
+        text, reasons, rewritten = self.service.validate_and_clamp(
+            text='Привет, как дела?',
+            mode='addressed_reply',
+            quiz_active=False,
+            recent_assistant_texts=['Привет, как дела?', 'Скажу короче: Привет, как дела?'],
+        )
+        self.assertEqual(text, '')
+        self.assertFalse(rewritten)
+        self.assertIn('suppressed_repeated_reply', reasons)
     def test_length_clamp(self) -> None:
         candidate = 'Очень длинный ответ. ' * 30
         text, reasons, rewritten = self.service.validate_and_clamp(

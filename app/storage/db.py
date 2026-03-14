@@ -245,6 +245,14 @@ class Database:
             await db.commit()
         return inserted
 
+    async def get_valid_llm_questions_count(self) -> int:
+        async with aiosqlite.connect(self.path) as db:
+            async with db.execute(
+                "SELECT COUNT(1) FROM llm_questions WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
+            ) as cursor:
+                row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
     async def get_candidate_questions(
         self,
         difficulty: str,

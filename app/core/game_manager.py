@@ -194,6 +194,13 @@ class GameManager:
                 return 'Сейчас нет готовых LLM-вопросов для старта. Попробуй позже.'
 
             self.games[chat_id] = state
+            asyncio.create_task(
+                self.quiz_engine.maybe_start_background_cache_refill(
+                    chat_id=chat_id,
+                    quiz_mode=quiz_mode,
+                    preferred_category=preferred_category,
+                )
+            )
 
             mode_label = self._mode_label(quiz_mode)
 
@@ -529,6 +536,13 @@ class GameManager:
 
         task = asyncio.create_task(self._question_timeout(bot, chat_id, state.asked_count))
         self.question_tasks[chat_id] = task
+        asyncio.create_task(
+            self.quiz_engine.maybe_start_background_cache_refill(
+                chat_id=chat_id,
+                quiz_mode=state.quiz_mode,
+                preferred_category=state.preferred_category,
+            )
+        )
 
     async def _question_timeout(self, bot: Bot, chat_id: int, question_number: int) -> None:
         state = self.games.get(chat_id)

@@ -297,24 +297,6 @@ class LLMQuestionProvider:
         allow_image_rounds: bool,
         allow_music_rounds: bool,
     ) -> str:
-        recent_rounds = self.history.recent_round_types(chat_id, 4)
-        last_round = recent_rounds[-1] if recent_rounds else ''
-
-        if stage == 'special':
-            if allow_music_rounds and category == 'Музыка' and self.music_rounds and last_round != 'audio':
-                return 'audio'
-            if allow_image_rounds and category == 'География' and last_round != 'image':
-                return 'image'
-            return 'text'
-
-        if allow_music_rounds and category == 'Музыка' and self.music_rounds:
-            if last_round != 'audio' and random.random() < 0.25:
-                return 'audio'
-
-        if allow_image_rounds and category == 'География':
-            if last_round != 'image' and random.random() < 0.18:
-                return 'image'
-
         return 'text'
 
     async def _generate_text_question(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,10 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class QuizEngineService:
+    TARGET_CACHE_SIZE = 500
+    LOW_WATERMARK_CACHE_SIZE = 300
+    GENERATION_BATCH_SIZE = 50
+
     def __init__(self, db=None, llm_provider=None, dedup_service: Optional[QuestionDedupService] = None) -> None:
         self.db = db
         self.llm_provider = llm_provider
         self.dedup_service = dedup_service or QuestionDedupService()
+        self.background_refill_inflight: set[int] = set()
+        self.category_memory_by_chat: dict[int, dict[str, list[str]]] = {}
 
     def game_profile_label(self, profile: str) -> str:
         mapping = {
@@ -255,43 +262,8 @@ class QuizEngineService:
                 valid_batch = validator(batch)
             else:
                 valid_batch = batch
-            accepted = []
-            seen_question_hashes: set[str] = set()
-            seen_uniqueness_hashes: set[str] = set()
-            for candidate in valid_batch:
-                candidate.quality_score = max(
-                    0.1,
-                    min(
-                        1.0,
-                        0.35 + (0.01 * len(candidate.question_text)) + (0.02 * len(candidate.explanation)),
-                    ),
-                )
-
-                if candidate.question_hash in seen_question_hashes or candidate.uniqueness_hash in seen_uniqueness_hashes:
-                    await self.db.save_question_rejection(
-                        raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
-                        reject_reason='duplicate_in_batch',
-                        matched_uniqueness_hash=candidate.uniqueness_hash,
-                    )
-                    continue
-
-                existing = await self.db.find_question_by_hashes(candidate.question_hash, candidate.uniqueness_hash)
-                if existing is not None:
-                    await self.db.save_question_rejection(
-                        raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
-                        reject_reason='duplicate_in_cache',
-                        matched_question_id=int(existing['id']),
-                        matched_uniqueness_hash=str(existing.get('uniqueness_hash') or ''),
-                    )
-                    continue
-
-                seen_question_hashes.add(candidate.question_hash)
-                seen_uniqueness_hashes.add(candidate.uniqueness_hash)
-                accepted.append(candidate)
-
-            if accepted:
-                await self.db.save_generated_questions(accepted)
-            else:
+            accepted_count = await self._persist_unique_candidates(game_state.chat_id, game_state.quiz_mode, valid_batch)
+            if accepted_count == 0:
                 logger.warning(
                     'Пакет генерации не дал валидных LLM-вопросов: chat_id=%s, mode=%s, valid_batch=%s',
                     game_state.chat_id,
@@ -302,6 +274,117 @@ class QuizEngineService:
             logger.exception('Не удалось догенерировать пакет вопросов для буфера')
         finally:
             game_state.generation_inflight = False
+
+    async def maybe_start_background_cache_refill(self, chat_id: int, quiz_mode: str, preferred_category: str) -> None:
+        if self.db is None or self.llm_provider is None:
+            return
+        cache_size = await self.db.get_valid_llm_questions_count()
+        if cache_size >= self.LOW_WATERMARK_CACHE_SIZE:
+            return
+        if chat_id in self.background_refill_inflight:
+            return
+
+        self.background_refill_inflight.add(chat_id)
+        try:
+            await self._run_background_cache_refill(chat_id, quiz_mode, preferred_category)
+        finally:
+            self.background_refill_inflight.discard(chat_id)
+
+    async def _run_background_cache_refill(self, chat_id: int, quiz_mode: str, preferred_category: str) -> None:
+        if self.db is None or self.llm_provider is None:
+            return
+
+        while True:
+            cache_size = await self.db.get_valid_llm_questions_count()
+            if cache_size >= self.TARGET_CACHE_SIZE:
+                logger.info('Фоновый прогрев завершён: chat_id=%s cache_size=%s', chat_id, cache_size)
+                return
+
+            request_count = min(self.GENERATION_BATCH_SIZE, self.TARGET_CACHE_SIZE - cache_size)
+            category = preferred_category if preferred_category and preferred_category != 'Случайно' else 'Случайно'
+            difficulty = random.choice(['easy', 'medium', 'hard'])
+
+            batch = await self.llm_provider.generate_question_batch(
+                {
+                    'chat_id': chat_id,
+                    'count': request_count,
+                    'difficulty': difficulty,
+                    'category': category,
+                    'mode': quiz_mode,
+                    'llm_only': True,
+                }
+            )
+            validator = getattr(self.llm_provider, 'validate_question_batch', None)
+            valid_batch = validator(batch) if callable(validator) else batch
+            accepted_count = await self._persist_unique_candidates(chat_id, quiz_mode, valid_batch)
+
+            if accepted_count == 0:
+                logger.warning(
+                    'Фоновая генерация не пополнила кэш: chat_id=%s cache_size=%s requested=%s valid=%s',
+                    chat_id,
+                    cache_size,
+                    request_count,
+                    len(valid_batch),
+                )
+                return
+
+    async def _persist_unique_candidates(self, chat_id: int, quiz_mode: str, valid_batch: list) -> int:
+        if self.db is None:
+            return 0
+        accepted = []
+        seen_question_hashes: set[str] = set()
+        seen_uniqueness_hashes: set[str] = set()
+
+        for candidate in valid_batch:
+            candidate.quality_score = max(
+                0.1,
+                min(
+                    1.0,
+                    0.35 + (0.01 * len(candidate.question_text)) + (0.02 * len(candidate.explanation)),
+                ),
+            )
+
+            if candidate.question_hash in seen_question_hashes or candidate.uniqueness_hash in seen_uniqueness_hashes:
+                await self.db.save_question_rejection(
+                    raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
+                    reject_reason='duplicate_in_batch',
+                    matched_uniqueness_hash=candidate.uniqueness_hash,
+                )
+                continue
+
+            existing = await self.db.find_question_by_hashes(candidate.question_hash, candidate.uniqueness_hash)
+            if existing is not None:
+                await self.db.save_question_rejection(
+                    raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
+                    reject_reason='duplicate_in_cache',
+                    matched_question_id=int(existing['id']),
+                    matched_uniqueness_hash=str(existing.get('uniqueness_hash') or ''),
+                )
+                continue
+
+            seen_question_hashes.add(candidate.question_hash)
+            seen_uniqueness_hashes.add(candidate.uniqueness_hash)
+            candidate.created_for_mode = quiz_mode
+            accepted.append(candidate)
+
+        if not accepted:
+            return 0
+
+        await self.db.save_generated_questions(accepted)
+        self._remember_batch_by_category(chat_id, accepted)
+        return len(accepted)
+
+    def _remember_batch_by_category(self, chat_id: int, accepted: list) -> None:
+        buckets = self.category_memory_by_chat.setdefault(chat_id, {})
+        for candidate in accepted:
+            category = (candidate.topic or 'Общие знания').strip() or 'Общие знания'
+            bucket = buckets.setdefault(category, [])
+            marker = candidate.question_hash or candidate.question_text
+            if marker in bucket:
+                continue
+            bucket.append(marker)
+            if len(bucket) > 300:
+                del bucket[0]
 
     async def filter_repeated_questions(self, candidates: list[dict], context: QuestionSelectionContext) -> list[dict]:
         if self.db is None:

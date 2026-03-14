@@ -10,17 +10,18 @@ class ChatHistoryServiceTests(unittest.TestCase):
         self.service = ChatHistoryService(max_items=2)
 
     def test_remember_and_limit(self) -> None:
-        self.service.remember_message(1, 'user', 'u1', 'first')
-        self.service.remember_message(1, 'assistant', 'bot', 'second')
-        self.service.remember_message(1, 'user', 'u2', 'third')
+        self.service.remember_message(1, 'user', 'u1', 'first', author_id=10, addressed_to_alisa=True)
+        self.service.remember_message(1, 'assistant', 'bot', 'second', author_id=20)
+        self.service.remember_message(1, 'user', 'u2', 'third', author_id=30)
 
         history = self.service.get_history(1)
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]['text'], 'second')
         self.assertEqual(history[1]['text'], 'third')
+        self.assertEqual(history[1]['author_id'], 30)
 
     def test_empty_text_is_ignored(self) -> None:
-        self.service.remember_message(1, 'user', 'u1', '   ')
+        self.service.remember_message(1, 'user', 'u1', '   ', author_id=10)
         self.assertEqual(self.service.get_history(1), [])
 
     def test_cooldown_tracking(self) -> None:

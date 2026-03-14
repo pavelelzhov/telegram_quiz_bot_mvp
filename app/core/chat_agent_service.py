@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Optional
 
 from app.agent.memory_store import MemoryStore
@@ -18,21 +19,38 @@ class ChatAgentService:
         else:
             self.agent_reply_provider = agent_reply_provider
 
-    def detect_mode(self, text: str) -> str:
+    def detect_mode(self, text: str, fallback_mode: str = 'addressed_reply') -> str:
         lowered = text.lower()
 
         support_tokens = [
             'мне плохо', 'тревожно', 'паника', 'паническую', 'устал', 'не вывожу',
-            'одиноко', 'грустно', 'тяжело', 'накрывает', 'депресс', 'разбит'
+            'одиноко', 'грустно', 'тяжело', 'накрывает', 'депресс', 'разбит', 'день в мусор'
         ]
-        if any(token in lowered for token in support_tokens):
-            return 'support'
+        if self._contains_any_token(lowered, support_tokens):
+            return 'warm_support'
 
-        roast_tokens = ['обосри', 'прожарь', 'роаст', 'разнеси меня', 'поругай меня', 'обругай']
-        if any(token in lowered for token in roast_tokens):
-            return 'roast'
+        pushback_tokens = ['заткнись', 'тупая', 'идиотка', 'дура']
+        if self._contains_any_token(lowered, pushback_tokens):
+            return 'pushback'
 
-        return 'chat'
+        micro_tokens = [
+            'спасибо', 'пасиб', 'благодарю', 'привет', 'здорово', 'доброе утро', 'добрый вечер',
+            'лол', 'ахах', 'хаха', 'ок', 'оке', 'понял', 'поняла'
+        ]
+        if self._contains_any_token(lowered, micro_tokens):
+            return 'micro_reaction'
+
+        return fallback_mode
+
+    def _contains_any_token(self, text: str, tokens: list[str]) -> bool:
+        for token in tokens:
+            if ' ' in token:
+                if token in text:
+                    return True
+                continue
+            if re.search(rf'(?<!\w){re.escape(token)}(?!\w)', text, flags=re.IGNORECASE):
+                return True
+        return False
 
     async def generate_reply(
         self,
@@ -45,10 +63,12 @@ class ChatAgentService:
         quiz_active: bool,
         current_question_text: str | None,
         addressed: bool,
+        mode: str,
     ) -> str:
-        mode = self.detect_mode(text)
+        final_mode = self.detect_mode(text, fallback_mode=mode)
         user_memory = self.memory_store.get_user_summary(chat_id, user_id, username)
         chat_memory = self.memory_store.get_chat_summary(chat_id)
+        relationship_hint = self.memory_store.get_relationship_hint(chat_id, user_id, username)
 
         return await self.agent_reply_provider.generate_reply(
             chat_title=chat_title,
@@ -60,5 +80,6 @@ class ChatAgentService:
             addressed=addressed,
             user_memory=user_memory,
             chat_memory=chat_memory,
-            mode=mode,
+            mode=final_mode,
+            relationship_hint=relationship_hint,
         )

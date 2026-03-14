@@ -16,46 +16,6 @@ from app.providers.web_search_provider import WebSearchProvider
 from app.storage.db import Database
 from app.utils.ops_log import log_operation
 
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
-logger = logging.getLogger(__name__)
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -137,7 +97,8 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
         )
 
     async def _start_quiz(message: Message, question_limit: int, quiz_mode: str) -> None:
-        if message.chat.type == 'private':
+        private_allowed_modes = {'solo_adaptive', 'daily'}
+        if message.chat.type == 'private' and quiz_mode not in private_allowed_modes:
             await message.answer('Этот бот лучше использовать в групповом чате.', reply_markup=main_menu_kb())
             return
 
@@ -513,6 +474,89 @@ def build_router(game_manager: GameManager, db: Database) -> Router:
     @router.message(F.text == '⛔ Стоп')
     async def btn_stop(message: Message) -> None:
         await _stop_quiz(message, 'Игра остановлена кнопкой.')
+
+
+    @router.message(Command('solo_start'))
+    async def cmd_solo_start(message: Message) -> None:
+        if message.chat.type != 'private':
+            await message.answer('Эта команда предназначена для личного режима.')
+            return
+        await _start_quiz(message, 7, 'solo_adaptive')
+
+    @router.message(Command('daily'))
+    async def cmd_daily(message: Message) -> None:
+        await _start_quiz(message, 5, 'daily')
+
+    @router.message(Command('profile'))
+    async def cmd_profile(message: Message) -> None:
+        await _send_profile(message)
+
+    @router.message(Command('my_level'))
+    async def cmd_my_level(message: Message) -> None:
+        if not message.from_user:
+            return
+        snapshot = await db.get_player_skill_profile(message.from_user.id)
+        await message.answer(
+            f'🧠 Твой уровень: {snapshot.current_band}\n'
+            f'Accuracy: {snapshot.recent_accuracy:.0%}\n'
+            f'Текущая серия: {snapshot.current_streak}\n'
+            f'Лучшая серия: {snapshot.best_streak}',
+            reply_markup=main_menu_kb(),
+        )
+
+    @router.message(Command('quiz_mode'))
+    async def cmd_quiz_mode(message: Message) -> None:
+        await message.answer('Режимы: classic, blitz, epic, team2v2, solo_adaptive, daily', reply_markup=main_menu_kb())
+
+    @router.message(Command('quiz_topics'))
+    async def cmd_quiz_topics(message: Message, command: CommandObject) -> None:
+        topics = []
+        if command.args:
+            topics = [item.strip() for item in command.args.split(',')]
+        game_manager.chat_config.set_preferred_topics(message.chat.id, topics)
+        await message.answer(f'Темы обновлены: {", ".join(topics) if topics else "без фокуса"}', reply_markup=main_menu_kb())
+
+    @router.message(Command('quiz_level_policy'))
+    async def cmd_quiz_level_policy(message: Message) -> None:
+        cfg = game_manager.get_chat_settings(message.chat.id)
+        await message.answer(f'Adaptive policy: {"on" if cfg.adaptive_mode_enabled else "off"}', reply_markup=main_menu_kb())
+
+    @router.message(Command('leaderboard'))
+    async def cmd_leaderboard(message: Message) -> None:
+        await _send_top(message)
+
+    @router.message(Command('quiz_settings'))
+    async def cmd_quiz_settings(message: Message) -> None:
+        await _send_settings(message)
+
+    @router.message(Command('quiz_timezone'))
+    async def cmd_quiz_timezone(message: Message, command: CommandObject) -> None:
+        if not command.args:
+            await message.answer('Использование: /quiz_timezone UTC или /quiz_timezone Europe/Berlin', reply_markup=main_menu_kb())
+            return
+        requested_timezone = command.args.strip()
+        if game_manager.daily_challenge.is_timezone_supported(requested_timezone):
+            game_manager.chat_config.set_timezone(message.chat.id, requested_timezone)
+            await message.answer(f'Таймзона обновлена: {requested_timezone}', reply_markup=main_menu_kb())
+            return
+
+        game_manager.chat_config.set_timezone(message.chat.id, 'UTC')
+        await message.answer(
+            'Не удалось применить эту таймзону в текущем окружении. '
+            'Поставил UTC как универсальный fallback.',
+            reply_markup=main_menu_kb(),
+        )
+
+    @router.message(Command('quiz_repeat_rules'))
+    async def cmd_quiz_repeat_rules(message: Message, command: CommandObject) -> None:
+        days = 5
+        if command.args:
+            try:
+                days = int(command.args.strip())
+            except ValueError:
+                days = 5
+        game_manager.chat_config.set_repeat_rules(message.chat.id, days, True)
+        await message.answer(f'Окно анти-повторов: {days} дней', reply_markup=main_menu_kb())
 
     @router.message(F.text)
     async def answer_listener(message: Message) -> None:

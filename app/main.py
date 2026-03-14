@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import socket
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError
 
 from app.bot.handlers import build_router
@@ -15,6 +17,24 @@ logger = logging.getLogger(__name__)
 
 def should_retry_polling(exc: BaseException) -> bool:
     return isinstance(exc, (TelegramNetworkError, asyncio.TimeoutError, OSError))
+
+
+def build_bot_session() -> AiohttpSession:
+    proxy = settings.telegram_proxy_url.strip() or None
+    timeout = max(5.0, float(settings.telegram_request_timeout_seconds))
+
+    if proxy:
+        try:
+            session = AiohttpSession(proxy=proxy, timeout=timeout)
+        except RuntimeError as exc:
+            logger.warning('Proxy is configured but proxy transport is unavailable, fallback to direct Telegram session: %s', exc)
+            session = AiohttpSession(timeout=timeout)
+    else:
+        session = AiohttpSession(timeout=timeout)
+
+    if settings.telegram_force_ipv4:
+        session._connector_init['family'] = socket.AF_INET
+    return session
 
 
 async def run_polling_with_retry(dp: Dispatcher, bot: Bot) -> None:
@@ -57,7 +77,7 @@ async def main() -> None:
     game_manager = GameManager(db=db, question_provider=question_provider)
     asyncio.create_task(game_manager.quiz_engine.ensure_cache_after_restart())
 
-    bot = Bot(token=settings.bot_token)
+    bot = Bot(token=settings.bot_token, session=build_bot_session())
     dp = Dispatcher()
     dp.include_router(build_router(game_manager=game_manager, db=db))
 

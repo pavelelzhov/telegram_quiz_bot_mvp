@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     polling_retry_delay_seconds: float = 3.0
     polling_max_retries: int = 0
 
+
+    telegram_request_timeout_seconds: float = 60.0
+    telegram_proxy_url: str = ''
+    telegram_force_ipv4: bool = False
+
     alisa_enabled: bool = True
     alisa_name: str = 'Алиса'
     alisa_name_aliases: str = 'алиса'

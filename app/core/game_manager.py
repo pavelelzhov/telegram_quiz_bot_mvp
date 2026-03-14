@@ -18,6 +18,7 @@ from app.core.chat_history_service import ChatHistoryService
 from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
+from app.core.relationship_profile_service import RelationshipProfileService
 from app.core.alisa_policy import (
     AddressingPolicyService,
     ParticipationDecisionService,
@@ -47,6 +48,7 @@ class GameManager:
         self.db = db
         self.question_provider = question_provider
         self.memory_store = MemoryStore()
+        self.relationship_profiles = RelationshipProfileService(self.memory_store)
         self.chat_agent_service = ChatAgentService(self.memory_store)
         self.feedback_text = FeedbackTextService()
         self.invite_service = InviteService()
@@ -383,7 +385,13 @@ class GameManager:
             addressed_to_alisa=addressed,
         )
         self.invite_service.remember_activity(chat_id, user_id, username, text)
-        self.memory_store.note_message(chat_id, user_id, username, text, addressed_to_alisa=addressed)
+        self.relationship_profiles.note_user_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            username=username,
+            text=text,
+            addressed_to_alisa=addressed,
+        )
 
         async def _start_quiz(started_by: int) -> None:
             await self.start_game(bot, chat_id, started_by_user_id=started_by, question_limit=5, quiz_mode='classic')
@@ -458,7 +466,7 @@ class GameManager:
 
         self.chat_history.mark_reply(chat_id, now)
         self.participation_decision.mark_replied(chat_id)
-        self.memory_store.note_alisa_reply(chat_id, user_id, mode)
+        self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
         self.chat_history.remember_message(
             chat_id,
             'assistant',

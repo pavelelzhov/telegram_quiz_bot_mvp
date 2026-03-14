@@ -409,6 +409,9 @@ class GameManager:
         state = self.games.get(chat_id)
         quiz_active = bool(state and state.is_active)
         current_question_text = state.current_question.question if quiz_active and state and state.current_question else None
+        recent_messages = self.invite_service.recent_message_count(chat_id, 180)
+        recent_unique_users = self.invite_service.recent_unique_user_count(chat_id, 180)
+        tension_level = self.relationship_profiles.get_chat_tension_level(chat_id=chat_id)
 
         if cfg.host_mode_enabled and not quiz_active:
             if await self.invite_orchestration.maybe_send_host_invite(
@@ -422,14 +425,20 @@ class GameManager:
 
         decision = self.participation_decision.decide(
             chat_id=chat_id,
+            user_id=user_id,
             addressed=addressing,
             quiz_active=quiz_active,
+            recent_messages=recent_messages,
+            recent_unique_users=recent_unique_users,
+            tension_level=tension_level,
         )
         if not decision.should_reply:
             logger.debug('Alisa silence chat_id=%s user_id=%s reasons=%s', chat_id, user_id, decision.reason_codes)
             return False
 
-        mode = self.persona_policy.choose_mode(text=text, addressed_by=addressing.addressed_by, quiz_active=quiz_active)
+        mode = decision.mode
+        if mode == 'addressed_reply':
+            mode = self.persona_policy.choose_mode(text=text, addressed_by=addressing.addressed_by, quiz_active=quiz_active)
         now = time.time()
         if decision.cooldown_sec is not None and not self.chat_history.can_reply(chat_id, now, decision.cooldown_sec):
             logger.debug('Alisa suppressed by history cooldown chat_id=%s', chat_id)
@@ -465,7 +474,10 @@ class GameManager:
             return False
 
         self.chat_history.mark_reply(chat_id, now)
-        self.participation_decision.mark_replied(chat_id)
+        if decision.mode == 'initiative_topic_drop':
+            self.participation_decision.mark_initiative(chat_id)
+        else:
+            self.participation_decision.mark_replied(chat_id)
         self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
         self.chat_history.remember_message(
             chat_id,

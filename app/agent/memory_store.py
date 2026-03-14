@@ -167,6 +167,13 @@ class MemoryStore:
             return 'контакт нормальный, спокойный дружелюбный тон'
         return 'нейтральный контакт, без лишней резкости'
 
+    def get_chat_tension_level(self, chat_id: int) -> float:
+        chat = self._ensure_chat(chat_id)
+        try:
+            return max(0.0, min(1.0, float(chat.get('current_tension_level', 0.0))))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _extract_topics(self, text: str) -> list[str]:
         stopwords = {
             'бот', 'бота', 'боту', 'сегодня', 'сейчас', 'просто', 'вообще', 'короче', 'типа',

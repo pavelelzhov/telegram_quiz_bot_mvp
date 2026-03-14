@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from app.config import settings
 
@@ -76,6 +77,7 @@ class PersonaPolicyService:
         'разумеется',
         'обращайся',
         'могу помочь с этим',
+        'чем могу помочь',
         'если хочешь, я могу',
         'давай разбер',
         'вот что можно сделать',
@@ -93,6 +95,10 @@ class PersonaPolicyService:
         'warm_support': (
             'Ситуация: нужна короткая человеческая поддержка. '
             '1–2 короткие фразы, без лекций и без шаблонов ассистента.'
+        ),
+        'initiative_topic_drop': (
+            'Ситуация: Алиса сама включается в беседу. '
+            'Реплика должна быть органичной, короткой и не выглядеть как шаблон бота.'
         ),
         'quiz_safe_mode': (
             'Сейчас активен квиз. Нельзя спойлерить ответ или мешать игровому потоку.'
@@ -131,32 +137,87 @@ class PersonaPolicyService:
 class ParticipationDecisionService:
     def __init__(self) -> None:
         self.last_reply_ts: dict[int, float] = {}
+        self.last_addressed_user_ts: dict[tuple[int, int], float] = {}
+        self.last_initiative_ts: dict[int, float] = {}
+        self.initiative_budget_by_day: dict[tuple[int, str], int] = {}
 
     def decide(
         self,
         *,
         chat_id: int,
+        user_id: int,
         addressed: AddressingDecision,
         quiz_active: bool,
+        recent_messages: int,
+        recent_unique_users: int,
+        tension_level: float,
+        now_ts: float | None = None,
     ) -> ParticipationDecision:
+        now = time.time() if now_ts is None else now_ts
+
         if not settings.alisa_enabled:
             return ParticipationDecision(False, 'observed_silence', ['suppressed_policy_alisa_disabled'], quiz_active, None)
 
-        if not addressed.is_addressed:
-            if quiz_active:
-                return ParticipationDecision(False, 'observed_silence', ['suppressed_quiz_mode', *addressed.reason_codes], quiz_active, None)
-            return ParticipationDecision(False, 'observed_silence', addressed.reason_codes, quiz_active, None)
+        if addressed.is_addressed:
+            self.last_addressed_user_ts[(chat_id, user_id)] = now
+            cooldown = float(settings.alisa_cooldown_addressed_seconds)
+            last = self.last_reply_ts.get(chat_id, 0.0)
+            if now - last < cooldown:
+                return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], quiz_active, cooldown)
+            return ParticipationDecision(True, 'addressed_reply', addressed.reason_codes, quiz_active, cooldown)
 
-        now = time.time()
-        cooldown = float(settings.alisa_cooldown_addressed_seconds)
-        last = self.last_reply_ts.get(chat_id, 0.0)
-        if now - last < cooldown:
-            return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], quiz_active, cooldown)
+        if quiz_active:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_quiz_mode', *addressed.reason_codes], True, None)
 
-        return ParticipationDecision(True, 'addressed_reply', addressed.reason_codes, quiz_active, cooldown)
+        followup_window = float(settings.alisa_followup_window_seconds)
+        last_addressed_ts = self.last_addressed_user_ts.get((chat_id, user_id), 0.0)
+        if now - last_addressed_ts <= followup_window:
+            cooldown = float(settings.alisa_cooldown_addressed_seconds)
+            if now - self.last_reply_ts.get(chat_id, 0.0) < cooldown:
+                return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], False, cooldown)
+            return ParticipationDecision(
+                True,
+                'addressed_reply',
+                ['addressed_followup_window'],
+                False,
+                cooldown,
+            )
+
+        if not settings.alisa_initiative_enabled:
+            return ParticipationDecision(False, 'observed_silence', addressed.reason_codes, False, None)
+
+        if recent_messages < settings.alisa_min_messages_window_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_activity'], False, None)
+
+        if recent_unique_users < settings.alisa_min_unique_users_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_low_unique_users'], False, None)
+
+        if tension_level > settings.alisa_max_recent_tension_for_initiative:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_high_tension'], False, None)
+
+        min_between = float(settings.alisa_min_minutes_between_initiatives * 60)
+        last_initiative = self.last_initiative_ts.get(chat_id, 0.0)
+        if now - last_initiative < min_between:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], False, min_between)
+
+        day_key = datetime.now(timezone.utc).date().isoformat()
+        budget_key = (chat_id, day_key)
+        used = self.initiative_budget_by_day.get(budget_key, 0)
+        if used >= settings.alisa_max_initiatives_per_day:
+            return ParticipationDecision(False, 'observed_silence', ['suppressed_initiative_budget'], False, None)
+
+        return ParticipationDecision(True, 'initiative_topic_drop', ['passive_initiative_allowed'], False, None)
 
     def mark_replied(self, chat_id: int) -> None:
         self.last_reply_ts[chat_id] = time.time()
+
+    def mark_initiative(self, chat_id: int) -> None:
+        now = time.time()
+        self.last_reply_ts[chat_id] = now
+        self.last_initiative_ts[chat_id] = now
+        day_key = datetime.now(timezone.utc).date().isoformat()
+        budget_key = (chat_id, day_key)
+        self.initiative_budget_by_day[budget_key] = self.initiative_budget_by_day.get(budget_key, 0) + 1
 
 
 class ReplyValidationService:

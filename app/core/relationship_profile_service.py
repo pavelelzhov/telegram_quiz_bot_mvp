@@ -37,3 +37,6 @@ class RelationshipProfileService:
 
     def get_chat_summary(self, *, chat_id: int) -> str:
         return self.memory_store.get_chat_summary(chat_id=chat_id)
+
+    def get_chat_tension_level(self, *, chat_id: int) -> float:
+        return self.memory_store.get_chat_tension_level(chat_id=chat_id)

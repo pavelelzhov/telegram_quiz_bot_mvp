@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     alisa_cooldown_addressed_seconds: int = 8
     alisa_cooldown_initiative_seconds: int = 2100
     alisa_cooldown_pushback_seconds: int = 12
+    alisa_followup_window_seconds: int = 45
 
     alisa_memory_summary_max_chars: int = 300
     alisa_history_window_size: int = 30

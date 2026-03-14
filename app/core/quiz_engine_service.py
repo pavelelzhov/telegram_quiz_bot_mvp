@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -192,7 +194,43 @@ class QuizEngineService:
                     'mode': game_state.quiz_mode,
                 }
             )
-            await self.db.save_generated_questions(batch)
+            valid_batch = self.llm_provider.validate_question_batch(batch)
+            accepted = []
+            seen_question_hashes: set[str] = set()
+            seen_uniqueness_hashes: set[str] = set()
+            for candidate in valid_batch:
+                candidate.quality_score = max(
+                    0.1,
+                    min(
+                        1.0,
+                        0.35 + (0.01 * len(candidate.question_text)) + (0.02 * len(candidate.explanation)),
+                    ),
+                )
+
+                if candidate.question_hash in seen_question_hashes or candidate.uniqueness_hash in seen_uniqueness_hashes:
+                    await self.db.save_question_rejection(
+                        raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
+                        reject_reason='duplicate_in_batch',
+                        matched_uniqueness_hash=candidate.uniqueness_hash,
+                    )
+                    continue
+
+                existing = await self.db.find_question_by_hashes(candidate.question_hash, candidate.uniqueness_hash)
+                if existing is not None:
+                    await self.db.save_question_rejection(
+                        raw_payload=json.dumps(asdict(candidate), ensure_ascii=False),
+                        reject_reason='duplicate_in_cache',
+                        matched_question_id=int(existing['id']),
+                        matched_uniqueness_hash=str(existing.get('uniqueness_hash') or ''),
+                    )
+                    continue
+
+                seen_question_hashes.add(candidate.question_hash)
+                seen_uniqueness_hashes.add(candidate.uniqueness_hash)
+                accepted.append(candidate)
+
+            if accepted:
+                await self.db.save_generated_questions(accepted)
         except Exception:
             logger.exception('Не удалось догенерировать пакет вопросов для буфера')
         finally:

@@ -480,6 +480,23 @@ class Database:
             )
             await db.commit()
 
+
+    async def find_question_by_hashes(self, question_hash: str, uniqueness_hash: str) -> Optional[dict[str, Any]]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                '''
+                SELECT id, question_hash, uniqueness_hash
+                FROM llm_questions
+                WHERE question_hash = ? OR uniqueness_hash = ?
+                ORDER BY id DESC
+                LIMIT 1
+                ''',
+                (question_hash, uniqueness_hash),
+            ) as cursor:
+                row = await cursor.fetchone()
+        return None if row is None else dict(row)
+
     async def save_question_rejection(
         self,
         raw_payload: str,

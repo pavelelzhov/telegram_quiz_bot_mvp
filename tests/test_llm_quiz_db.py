@@ -49,6 +49,11 @@ class LlmQuizDbTests(unittest.TestCase):
                 candidates = await db.get_candidate_questions('medium', limit=5)
                 self.assertGreaterEqual(len(candidates), 1)
 
+
+                found = await db.find_question_by_hashes('qh1', 'uh1')
+                self.assertIsNotNone(found)
+                self.assertEqual(found['question_hash'], 'qh1')
+
                 await db.log_question_usage(
                     QuestionUsageRecord(
                         question_id=candidates[0]['id'],

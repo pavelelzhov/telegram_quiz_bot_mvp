@@ -206,5 +206,21 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertTrue(any(reason.startswith('clamped_') for reason in reasons))
 
 
+class PersonaPolicyServiceTests(unittest.TestCase):
+    def test_choose_mode_prefers_micro_reaction_for_addressed_short_social_phrase(self) -> None:
+        from app.core.alisa_policy import PersonaPolicyService
+
+        service = PersonaPolicyService()
+        mode = service.choose_mode(text='Алиса, спасибо!', addressed_by='name', quiz_active=False)
+        self.assertEqual(mode, 'micro_reaction')
+
+    def test_choose_mode_stays_addressed_reply_without_micro_token(self) -> None:
+        from app.core.alisa_policy import PersonaPolicyService
+
+        service = PersonaPolicyService()
+        mode = service.choose_mode(text='Алиса, как думаешь?', addressed_by='name', quiz_active=False)
+        self.assertEqual(mode, 'addressed_reply')
+
+
 if __name__ == '__main__':
     unittest.main()

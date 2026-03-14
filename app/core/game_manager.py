@@ -11,9 +11,11 @@ from aiogram import Bot
 from app.agent.memory_store import MemoryStore
 from app.config import settings
 from app.core.adaptive_difficulty_service import AdaptiveDifficultyService
+from app.core.difficulty_service import DifficultyService
 from app.core.answer_flow_service import AnswerFlowService
 from app.core.chat_config_service import ChatConfigService
 from app.core.chat_history_service import ChatHistoryService
+from app.core.daily_challenge_service import DailyChallengeService
 from app.core.chat_participation_service import ChatParticipationService
 from app.core.chat_agent_service import ChatAgentService
 from app.core.feedback_text_service import FeedbackTextService
@@ -43,15 +45,17 @@ class GameManager:
         self.invite_service = InviteService()
         self.invite_orchestration = InviteOrchestrationService()
         self.adaptive_difficulty = AdaptiveDifficultyService()
-        self.answer_flow = AnswerFlowService()
+        self.difficulty_service = DifficultyService()
+        self.answer_flow = AnswerFlowService(db=db, difficulty_service=self.difficulty_service)
         self.chat_participation = ChatParticipationService()
         self.game_status = GameStatusService()
         self.game_summary = GameSummaryService()
         self.product_store = ProductStore()
-        self.quiz_engine = QuizEngineService()
+        self.quiz_engine = QuizEngineService(db=db, llm_provider=question_provider)
         self.chat_config = ChatConfigService()
         self.round_lifecycle = RoundLifecycleService()
         self.chat_history = ChatHistoryService(max_items=20)
+        self.daily_challenge = DailyChallengeService()
         self.games: Dict[int, GameState] = {}
         self.question_tasks: Dict[int, asyncio.Task] = {}
         self.recent_question_keys: Dict[int, Deque[str]] = defaultdict(
@@ -157,6 +161,9 @@ class GameManager:
                 preferred_category=preferred_category,
                 quiz_mode=quiz_mode,
                 team_assignments=team_assignments,
+                mode='team_battle' if quiz_mode == 'team2v2' else 'group_blitz',
+                local_game_date=self.daily_challenge.resolve_local_game_date(cfg.timezone),
+                adaptive_enabled=cfg.adaptive_mode_enabled,
             )
             self.games[chat_id] = state
 
@@ -252,6 +259,8 @@ class GameManager:
         question = state.current_question
         self.adaptive_difficulty.note_correct(chat_id)
         points_awarded, streak_count = self.answer_flow.register_correct_answer(state, user_id, username)
+        response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+        await self.answer_flow.finalize_answer(state, user_id, was_correct=True, response_ms=response_ms)
         self.memory_store.note_quiz_event(chat_id, user_id, username, correct=True)
 
         await self.product_store.note_correct(
@@ -455,18 +464,21 @@ class GameManager:
         target_difficulty = self.adaptive_difficulty.target_difficulty(chat_id, state.asked_count)
 
         try:
-            question = await self.question_provider.generate_question(
-                chat_id=chat_id,
-                used_keys=used_keys,
-                preferred_category=state.preferred_category,
-                allow_image_rounds=cfg.image_rounds_enabled,
-                allow_music_rounds=cfg.music_rounds_enabled,
-                stage=stage,
-                preferred_difficulty=target_difficulty,
-            )
+            await self.quiz_engine.prepare_question_buffer(state, list(state.scores.keys()))
+            question = await self.quiz_engine.select_next_question(state)
+            if question is None:
+                question = await self.question_provider.generate_question(
+                    chat_id=chat_id,
+                    used_keys=used_keys,
+                    preferred_category=state.preferred_category,
+                    allow_image_rounds=cfg.image_rounds_enabled,
+                    allow_music_rounds=cfg.music_rounds_enabled,
+                    stage=stage,
+                    preferred_difficulty=target_difficulty,
+                )
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
-            await bot.send_message(chat_id, 'Не удалось получить вопрос. Игра завершена.')
+            await bot.send_message(chat_id, 'Не удалось получить вопрос из LLM-кэша. Попробуйте ещё раз через минуту.')
             await self._finalize_game(bot, chat_id)
             return
 

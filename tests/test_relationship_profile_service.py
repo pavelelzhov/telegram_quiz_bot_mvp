@@ -33,6 +33,36 @@ class RelationshipProfileServiceTests(unittest.TestCase):
         self.assertTrue(user_summary)
         self.assertTrue(chat_summary)
 
+    def test_recent_context_keeps_multi_user_dialogue_snippets(self) -> None:
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=10,
+            username='alice',
+            text='Обсуждаем кино и музыку',
+            addressed_to_alisa=False,
+        )
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=11,
+            username='bob',
+            text='А я за документалки',
+            addressed_to_alisa=False,
+        )
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=10,
+            username='alice',
+            text='Мне ещё sci-fi нравится',
+            addressed_to_alisa=False,
+        )
+
+        user_recent = self.memory_store.get_user_recent_context(2, 10, 'alice')
+        chat_recent = self.memory_store.get_chat_recent_context(2)
+
+        self.assertIn('sci-fi', user_recent)
+        self.assertIn('alice:', chat_recent)
+        self.assertIn('bob:', chat_recent)
+
 
 if __name__ == '__main__':
     unittest.main()

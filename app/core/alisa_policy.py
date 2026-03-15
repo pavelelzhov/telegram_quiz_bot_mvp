@@ -133,9 +133,67 @@ class PersonaPolicyService:
             return 'pushback'
         if any(token in lowered for token in ('мне плохо', 'день в мусор', 'устал', 'тяжело', 'тревожно')):
             return 'warm_support'
+        if addressed_by and self._contains_micro_reaction_token(lowered):
+            return 'micro_reaction'
         if addressed_by:
             return 'addressed_reply'
         return 'observed_silence'
+
+    def _contains_micro_reaction_token(self, lowered_text: str) -> bool:
+        compact = re.sub(r'\s+', '', lowered_text)
+        if self._looks_like_short_social_ping(compact):
+            return True
+
+        micro_tokens = (
+            'спасибо',
+            'пасиб',
+            'спс',
+            'сяп',
+            'благодарю',
+            'привет',
+            'ку',
+            'йо',
+            'здорово',
+            'доброе утро',
+            'добрый вечер',
+            'лол',
+            'ахах',
+            'хаха',
+            'ок',
+            'оке',
+            'ага',
+            'ясно',
+            'понял',
+            'поняла',
+            'пон',
+        )
+        for token in micro_tokens:
+            if ' ' in token:
+                if token in lowered_text:
+                    return True
+                continue
+            if re.search(rf'(?<!\w){re.escape(token)}(?!\w)', lowered_text, flags=re.IGNORECASE):
+                return True
+        return False
+
+    def _looks_like_short_social_ping(self, compact_text: str) -> bool:
+        if not compact_text or len(compact_text) > 24:
+            return False
+
+        if re.fullmatch(r'[!?.,;:()\-_<3]+', compact_text):
+            return True
+
+        emoji_only = re.fullmatch(
+            r'[❤️🫶👍🙏😂🤣😅🙂😉🤝🔥✨💚💜💙🖤🤍💛🧡💔🥲😭😎🙃😘😍]+',
+            compact_text,
+        )
+        if emoji_only:
+            return True
+
+        if any(token in compact_text for token in (')))', 'ахах', 'хаха', 'лол', 'хех')):
+            return True
+
+        return False
 
 
 class InitiativeService:
@@ -189,6 +247,7 @@ class ParticipationDecisionService:
     def __init__(self) -> None:
         self.last_reply_ts: dict[int, float] = {}
         self.last_addressed_user_ts: dict[tuple[int, int], float] = {}
+        self.last_addressed_chat_ts: dict[int, float] = {}
         self.last_initiative_user_id: dict[int, int] = {}
         self.same_user_initiative_streak: dict[tuple[int, int], int] = {}
         self.initiative_service = InitiativeService()
@@ -212,6 +271,7 @@ class ParticipationDecisionService:
 
         if addressed.is_addressed:
             self.last_addressed_user_ts[(chat_id, user_id)] = now
+            self.last_addressed_chat_ts[chat_id] = now
             cooldown = float(settings.alisa_cooldown_addressed_seconds)
             last = self.last_reply_ts.get(chat_id, 0.0)
             if now - last < cooldown:
@@ -231,6 +291,19 @@ class ParticipationDecisionService:
                 True,
                 'addressed_reply',
                 ['addressed_followup_window'],
+                False,
+                cooldown,
+            )
+
+        chat_followup_ts = self.last_addressed_chat_ts.get(chat_id, 0.0)
+        if now - chat_followup_ts <= followup_window and recent_unique_users >= 2:
+            cooldown = float(settings.alisa_cooldown_addressed_seconds)
+            if now - self.last_reply_ts.get(chat_id, 0.0) < cooldown:
+                return ParticipationDecision(False, 'observed_silence', ['suppressed_cooldown'], False, cooldown)
+            return ParticipationDecision(
+                True,
+                'addressed_reply',
+                ['addressed_followup_chat_window'],
                 False,
                 cooldown,
             )
@@ -367,8 +440,28 @@ class ReplyValidationService:
         base = text.strip()
         if mode == 'warm_support':
             return f'Я рядом. {base}'
+        if mode == 'micro_reaction':
+            variants = (
+                'Есть контакт 🙂',
+                'Окей, приняла.',
+                'Поймала вайб 😌',
+                'Норм, едем дальше.',
+            )
+            return variants[self._stable_variant_index(base, len(variants))]
         if mode == 'initiative_topic_drop':
             if len(base) > 1:
                 return f'Кстати, {base[:1].lower() + base[1:]}'
             return f'Кстати, {base.lower()}'
-        return f'Скажу короче: {base}'
+        variants = (
+            f'Скажу короче: {base}',
+            f'Коротко так: {base}',
+            f'Если по-простому: {base}',
+            f'Суть такая: {base}',
+        )
+        return variants[self._stable_variant_index(base, len(variants))]
+
+    def _stable_variant_index(self, seed_text: str, size: int) -> int:
+        if size <= 1:
+            return 0
+        checksum = sum(ord(ch) for ch in seed_text)
+        return checksum % size

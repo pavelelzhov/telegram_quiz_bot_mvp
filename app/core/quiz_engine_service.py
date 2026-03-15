@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.config import settings
 from app.core.models import (
     ChatSettings,
     GameState,
@@ -31,6 +32,9 @@ class QuizEngineService:
         self.dedup_service = dedup_service or QuestionDedupService()
         self.background_refill_inflight: set[int] = set()
         self.category_memory_by_chat: dict[int, dict[str, list[str]]] = {}
+
+    def _is_generation_enabled(self) -> bool:
+        return bool(settings.quiz_allow_generation and self.llm_provider is not None and self.db is not None)
 
     def game_profile_label(self, profile: str) -> str:
         mapping = {
@@ -177,7 +181,8 @@ class QuizEngineService:
                 relaxed_repeat=True,
             )
 
-        await self.request_generation_if_buffer_low(game_state)
+        if self._is_generation_enabled():
+            await self.request_generation_if_buffer_low(game_state)
 
         if appended == 0 and len(game_state.question_buffer) < 5:
             post_generation_needed = max(0, 10 - len(game_state.question_buffer))
@@ -247,6 +252,7 @@ class QuizEngineService:
         else:
             filtered = await self.filter_repeated_questions(candidates, selection_context)
         filtered = sorted(filtered, key=lambda item: self.score_candidate_fit(item, selection_context), reverse=True)
+        filtered = self._mix_candidates_for_variety(filtered)
         appended = 0
         buffer_answer_fingerprints = {
             normalize_text(str(item.answer or ''))
@@ -260,28 +266,68 @@ class QuizEngineService:
             if answer_fingerprint and answer_fingerprint in buffer_answer_fingerprints:
                 continue
             game_state.question_buffer.append(
-                QuizQuestion(
-                    category=item.get('topic') or 'Общие знания',
-                    difficulty=item['difficulty'],
-                    topic=item.get('topic') or '',
-                    question=item['question_text'],
-                    answer=item['correct_answer_text'],
-                    aliases=[],
-                    hint='Подумай о главном факте вопроса.',
-                    explanation=item['explanation'],
-                    question_type=item['question_type'],
-                    source='llm_cache',
-                    question_id=item['id'],
-                    question_hash=item.get('question_hash', ''),
-                    uniqueness_hash=item.get('uniqueness_hash', ''),
-                    quality_score=float(item.get('quality_score') or 0),
-                )
+                self._candidate_to_quiz_question(item)
             )
             if answer_fingerprint:
                 buffer_answer_fingerprints.add(answer_fingerprint)
             appended += 1
 
         return appended
+
+    def _mix_candidates_for_variety(self, candidates: list[dict]) -> list[dict]:
+        if len(candidates) <= 2:
+            return candidates
+
+        buckets: dict[str, list[dict]] = {}
+        for item in candidates:
+            category = str(item.get('topic') or 'Общие знания').strip() or 'Общие знания'
+            bucket = buckets.setdefault(category, [])
+            bucket.append(item)
+
+        for bucket in buckets.values():
+            random.shuffle(bucket)
+
+        category_order = list(buckets.keys())
+        random.shuffle(category_order)
+
+        mixed: list[dict] = []
+        while True:
+            moved = False
+            for category in category_order:
+                bucket = buckets.get(category) or []
+                if not bucket:
+                    continue
+                mixed.append(bucket.pop(0))
+                moved = True
+            if not moved:
+                break
+
+        return mixed
+
+    def _candidate_to_quiz_question(self, item: dict) -> QuizQuestion:
+        raw_aliases = item.get('aliases')
+        aliases: list[str] = []
+        if isinstance(raw_aliases, list):
+            aliases = [str(alias).strip() for alias in raw_aliases if str(alias).strip()]
+
+        hint_text = str(item.get('hint_text') or '').strip() or 'Подумай о главном факте вопроса.'
+
+        return QuizQuestion(
+            category=item.get('topic') or 'Общие знания',
+            difficulty=item['difficulty'],
+            topic=item.get('topic') or '',
+            question=item['question_text'],
+            answer=item['correct_answer_text'],
+            aliases=aliases,
+            hint=hint_text,
+            explanation=item['explanation'],
+            question_type=item['question_type'],
+            source='llm_cache',
+            question_id=item['id'],
+            question_hash=item.get('question_hash', ''),
+            uniqueness_hash=item.get('uniqueness_hash', ''),
+            quality_score=float(item.get('quality_score') or 0),
+        )
 
     async def select_next_question(self, game_state: GameState, player_id: int | None = None) -> QuizQuestion | None:
         if not game_state.question_buffer:
@@ -294,7 +340,7 @@ class QuizEngineService:
     async def request_generation_if_buffer_low(self, game_state: GameState) -> None:
         if len(game_state.question_buffer) >= 3 or game_state.generation_inflight:
             return
-        if self.llm_provider is None or self.db is None:
+        if not self._is_generation_enabled():
             return
         game_state.generation_inflight = True
         try:
@@ -355,7 +401,7 @@ class QuizEngineService:
             game_state.generation_inflight = False
 
     async def maybe_start_background_cache_refill(self, chat_id: int, quiz_mode: str, preferred_category: str) -> None:
-        if self.db is None or self.llm_provider is None:
+        if not self._is_generation_enabled():
             return
         cache_size = await self.db.get_valid_llm_questions_count()
         if cache_size >= self.LOW_WATERMARK_CACHE_SIZE:
@@ -370,7 +416,15 @@ class QuizEngineService:
             self.background_refill_inflight.discard(chat_id)
 
     async def ensure_cache_after_restart(self) -> None:
-        if self.db is None or self.llm_provider is None:
+        if self.db is None:
+            return
+
+        if not self._is_generation_enabled():
+            cache_size = await self.db.get_valid_llm_questions_count()
+            logger.info(
+                'Стартовый контроль кэша: автогенерация выключена, работаем только из буфера (cache_size=%s)',
+                cache_size,
+            )
             return
 
         cache_size = await self.db.get_valid_llm_questions_count()
@@ -394,7 +448,7 @@ class QuizEngineService:
         )
 
     async def _run_background_cache_refill(self, chat_id: int, quiz_mode: str, preferred_category: str) -> None:
-        if self.db is None or self.llm_provider is None:
+        if not self._is_generation_enabled():
             return
 
         while True:
@@ -497,6 +551,8 @@ class QuizEngineService:
         inflight = chat_id in self.background_refill_inflight
         buckets = self.category_memory_by_chat.get(chat_id, {})
         categories_tracked = len(buckets)
+        generation_mode = 'вкл' if settings.quiz_allow_generation else 'выкл'
+        breakdown = await self.db.get_llm_question_breakdown(top_categories_limit=6)
 
         progress = min(100, int((cache_size / max(1, self.TARGET_CACHE_SIZE)) * 100))
         refill_state = 'идёт' if inflight else 'не идёт'
@@ -506,13 +562,23 @@ class QuizEngineService:
             else 'ниже порога, пополнение должно быть активным'
         )
 
+        difficulty = breakdown.get('difficulty', {})
+        difficulty_line = ', '.join(
+            f"{key}:{difficulty.get(key, 0)}" for key in ('easy', 'medium', 'hard')
+        )
+        category_rows = breakdown.get('top_categories', [])
+        categories_line = ', '.join(f'{name}: {count}' for name, count in category_rows) if category_rows else 'нет данных'
+
         return (
             '📦 Статус LLM-буфера\n'
             f'Валидных вопросов в кэше: {cache_size}\n'
+            f'Автогенерация новых вопросов: {generation_mode}\n'
             f'Целевой объём: {self.TARGET_CACHE_SIZE} ({progress}%)\n'
             f'Фоновое пополнение: {refill_state}\n'
             f'Категорий в памяти чата: {categories_tracked}\n'
-            f'Порог low-watermark: {self.LOW_WATERMARK_CACHE_SIZE} ({threshold_hint}).'
+            f'Порог low-watermark: {self.LOW_WATERMARK_CACHE_SIZE} ({threshold_hint}).\n'
+            f'Разбивка по сложности: {difficulty_line}\n'
+            f'Топ категорий: {categories_line}'
         )
 
     async def filter_repeated_questions(self, candidates: list[dict], context: QuestionSelectionContext) -> list[dict]:

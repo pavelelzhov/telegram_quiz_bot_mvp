@@ -97,6 +97,8 @@ class Database:
                     quality_score REAL NOT NULL DEFAULT 0,
                     is_valid INTEGER NOT NULL DEFAULT 1,
                     generated_at TEXT NOT NULL,
+                    aliases_json TEXT NOT NULL DEFAULT '[]',
+                    hint_text TEXT NOT NULL DEFAULT '',
                     expires_at TEXT,
                     created_for_mode TEXT NOT NULL DEFAULT 'classic'
                 )
@@ -182,6 +184,15 @@ class Database:
                 '''
             )
 
+            async with db.execute('PRAGMA table_info(llm_questions)') as cursor:
+                llm_cols = {row[1] for row in await cursor.fetchall()}
+            if 'aliases_json' not in llm_cols:
+                await db.execute("ALTER TABLE llm_questions ADD COLUMN aliases_json TEXT NOT NULL DEFAULT '[]'")
+            if 'hint_text' not in llm_cols:
+                await db.execute("ALTER TABLE llm_questions ADD COLUMN hint_text TEXT NOT NULL DEFAULT ''")
+            if 'created_for_mode' not in llm_cols:
+                await db.execute("ALTER TABLE llm_questions ADD COLUMN created_for_mode TEXT NOT NULL DEFAULT 'classic'")
+
             await db.execute('CREATE INDEX IF NOT EXISTS idx_llm_questions_question_hash ON llm_questions(question_hash)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_llm_questions_uniqueness_hash ON llm_questions(uniqueness_hash)')
             await db.execute('CREATE INDEX IF NOT EXISTS idx_usage_chat_local_date ON question_usage_log(chat_id, local_game_date)')
@@ -212,10 +223,10 @@ class Database:
                         provider_name, model_name, language, topic, subtopic,
                         difficulty, question_type, question_text, options_json,
                         correct_option_index, correct_answer_text, explanation,
-                        canonical_facts_json, uniqueness_tags_json, question_hash,
-                        uniqueness_hash, quality_score, is_valid, generated_at,
+                        canonical_facts_json, uniqueness_tags_json, question_hash, uniqueness_hash,
+                        quality_score, is_valid, generated_at, aliases_json, hint_text,
                         expires_at, created_for_mode
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         item.provider_name,
@@ -237,6 +248,10 @@ class Database:
                         item.quality_score,
                         1 if item.is_valid else 0,
                         generated_at,
+                        json.dumps(item.raw_payload.get('aliases', []), ensure_ascii=False)
+                        if isinstance(item.raw_payload, dict)
+                        else '[]',
+                        str(item.raw_payload.get('hint', '')).strip() if isinstance(item.raw_payload, dict) else '',
                         None,
                         item.created_for_mode,
                     ),
@@ -252,6 +267,45 @@ class Database:
             ) as cursor:
                 row = await cursor.fetchone()
         return int(row[0]) if row else 0
+
+    async def get_llm_question_breakdown(self, top_categories_limit: int = 8) -> dict[str, Any]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+
+            async with db.execute(
+                "SELECT COUNT(1) AS total FROM llm_questions WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))"
+            ) as cursor:
+                total_row = await cursor.fetchone()
+
+            async with db.execute(
+                """
+                SELECT difficulty, COUNT(1) AS cnt
+                FROM llm_questions
+                WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                GROUP BY difficulty
+                ORDER BY cnt DESC, difficulty ASC
+                """
+            ) as cursor:
+                difficulty_rows = await cursor.fetchall()
+
+            async with db.execute(
+                """
+                SELECT COALESCE(NULLIF(TRIM(topic), ''), 'Общие знания') AS topic_name, COUNT(1) AS cnt
+                FROM llm_questions
+                WHERE is_valid = 1 AND (expires_at IS NULL OR expires_at > datetime('now'))
+                GROUP BY topic_name
+                ORDER BY cnt DESC, topic_name ASC
+                LIMIT ?
+                """,
+                (max(1, int(top_categories_limit)),),
+            ) as cursor:
+                category_rows = await cursor.fetchall()
+
+        return {
+            'total': int(total_row['total']) if total_row else 0,
+            'difficulty': {str(row['difficulty']): int(row['cnt']) for row in difficulty_rows},
+            'top_categories': [(str(row['topic_name']), int(row['cnt'])) for row in category_rows],
+        }
 
     async def get_candidate_questions(
         self,
@@ -342,6 +396,11 @@ class Database:
                 item['uniqueness_tags'] = json.loads(item.get('uniqueness_tags_json') or '[]')
             except Exception:
                 item['uniqueness_tags'] = []
+            try:
+                item['aliases'] = json.loads(item.get('aliases_json') or '[]')
+            except Exception:
+                item['aliases'] = []
+            item['hint_text'] = str(item.get('hint_text') or '').strip()
             result.append(item)
         return result
 

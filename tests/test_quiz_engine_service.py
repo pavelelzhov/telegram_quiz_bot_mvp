@@ -96,6 +96,60 @@ class QuizEngineServiceTests(unittest.TestCase):
         self.assertEqual(core_epic.point_value, 1)
         self.assertEqual(core_epic.round_label, '🧩 Эпик-раунд')
 
+    def test_mix_candidates_for_variety_interleaves_categories(self) -> None:
+        candidates = [
+            {'id': 1, 'topic': 'История'},
+            {'id': 2, 'topic': 'История'},
+            {'id': 3, 'topic': 'Наука'},
+            {'id': 4, 'topic': 'Наука'},
+            {'id': 5, 'topic': 'Кино'},
+        ]
+
+        mixed = self.service._mix_candidates_for_variety(candidates)
+
+        self.assertEqual(len(mixed), len(candidates))
+        self.assertEqual(sorted(item['id'] for item in mixed), [1, 2, 3, 4, 5])
+        self.assertGreater(len({item.get('topic') for item in mixed[:3]}), 1)
+
+
+    def test_candidate_to_quiz_question_uses_aliases_and_hint(self) -> None:
+        candidate = {
+            'id': 7,
+            'topic': 'История',
+            'difficulty': 'medium',
+            'question_text': 'Кто основал Санкт-Петербург?',
+            'correct_answer_text': 'Пётр I',
+            'aliases': ['Петр 1', 'Пётр Первый'],
+            'hint_text': 'Подумай про первого императора.',
+            'explanation': 'Город был основан Петром I в 1703 году.',
+            'question_type': 'text',
+            'question_hash': 'qh-1',
+            'uniqueness_hash': 'uh-1',
+            'quality_score': 0.8,
+        }
+
+        question = self.service._candidate_to_quiz_question(candidate)
+
+        self.assertEqual(question.answer, 'Пётр I')
+        self.assertEqual(question.aliases, ['Петр 1', 'Пётр Первый'])
+        self.assertEqual(question.hint, 'Подумай про первого императора.')
+
+    def test_candidate_to_quiz_question_uses_default_hint(self) -> None:
+        candidate = {
+            'id': 1,
+            'topic': 'Общие знания',
+            'difficulty': 'easy',
+            'question_text': 'Q',
+            'correct_answer_text': 'A',
+            'explanation': 'E',
+            'question_type': 'text',
+        }
+
+        question = self.service._candidate_to_quiz_question(candidate)
+
+        self.assertEqual(question.aliases, [])
+        self.assertEqual(question.hint, 'Подумай о главном факте вопроса.')
+
 
 if __name__ == '__main__':
     unittest.main()

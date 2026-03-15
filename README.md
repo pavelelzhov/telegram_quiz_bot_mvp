@@ -93,3 +93,25 @@
 - `ALISA_AI_PHRASE_FILTER` / `ALISA_SELF_CHECK_ENABLED` — anti-AI фильтрация.
 - `ALISA_COOLDOWN_ADDRESSED_SECONDS` — кулдаун реактивных ответов.
 - `ALISA_HISTORY_WINDOW_SIZE` — окно истории для контекста.
+
+## Замена архива вопросов (100k -> 30k) через VSCode
+
+1) Открой терминал PowerShell в корне репозитория.
+
+2) Запусти скрипт замены:
+
+```powershell
+./scripts/replace_quiz_bundle.ps1
+```
+
+Что он делает:
+- копирует `C:\Users\elzho\Documents\налоговая\quiz_30000_sticky_v1_bundle.zip` в корень репозитория;
+- удаляет старый архив `quiz_bank_100k_ru_bundle.zip` (если есть);
+- добавляет изменения в git (`git add` / `git rm`);
+- если файл лежит не в `Documents\налоговая`, скрипт сам пробует найти его в `Documents`, `Downloads`
+  и через поиск по `C:\Users\<твой_пользователь>`.
+
+3) Импорт в базу остаётся по той же логике:
+
+```powershell
+python -m scripts.import_quiz_bundle --zip-path ".\quiz_30000_sticky_v1_bundle.zip" --db-path ".\quiz.db"

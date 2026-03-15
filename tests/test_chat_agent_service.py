@@ -64,6 +64,7 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_generate_reply_passes_mode_and_context(self) -> None:
         self.memory_store.note_message(chat_id=1, user_id=10, username='u', text='старое сообщение')
+        self.memory_store.note_message(chat_id=1, user_id=11, username='v', text='вторая реплика в чате')
 
         reply = await self.service.generate_reply(
             chat_id=1,
@@ -84,6 +85,15 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider.last_kwargs.get('mode'), 'pushback')
         self.assertEqual(self.provider.last_kwargs.get('chat_title'), 'Test Chat')
         self.assertEqual(self.provider.last_kwargs.get('sharpness_ceiling'), 'medium')
+        user_memory = str(self.provider.last_kwargs.get('user_memory', ''))
+        chat_memory = str(self.provider.last_kwargs.get('chat_memory', ''))
+        self.assertIn('недавние реплики', user_memory)
+        self.assertIn('свежий диалог', chat_memory)
+        self.assertIn('u:', chat_memory)
+        self.assertIn('v:', chat_memory)
+        relationship_hint = str(self.provider.last_kwargs.get('relationship_hint', ''))
+        self.assertIn('стиль общения пользователя', relationship_hint)
+        self.assertIn('предпочитаемая энергия', relationship_hint)
 
 
 if __name__ == '__main__':

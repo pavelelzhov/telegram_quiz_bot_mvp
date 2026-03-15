@@ -101,6 +101,25 @@ class GameManager:
             self.start_locks[chat_id] = lock
         return lock
 
+    def _build_participation_reply_kwargs(self, message_id: int | None, reason_codes: list[str]) -> dict[str, object]:
+        if message_id is None or message_id <= 0:
+            return {}
+        should_reply_to_message = any(
+            code in reason_codes
+            for code in (
+                'addressed_by_reply',
+                'addressed_by_name',
+                'addressed_by_mention',
+                'addressed_followup_window',
+                'addressed_followup_chat_window',
+                'passive_dialogue_join',
+                'passive_initiative_allowed',
+            )
+        )
+        if not should_reply_to_message:
+            return {}
+        return {'reply_to_message_id': message_id, 'allow_sending_without_reply': True}
+
     def get_game(self, chat_id: int) -> Optional[GameState]:
         return self.games.get(chat_id)
 
@@ -199,26 +218,11 @@ class GameManager:
 
             cache_size = await self.db.get_valid_llm_questions_count()
             if cache_size < self.quiz_engine.MIN_START_CACHE_SIZE:
-                asyncio.create_task(
-                    self.quiz_engine.maybe_start_background_cache_refill(
-                        chat_id=chat_id,
-                        quiz_mode=quiz_mode,
-                        preferred_category=preferred_category,
-                    )
-                )
-                await bot.send_message(
-                    chat_id,
-                    (
-                        'Кэш вопросов ещё недостаточно прогрет для уверенного старта без повторов. '
-                        f'Сейчас: {cache_size}, минимум для старта: {self.quiz_engine.MIN_START_CACHE_SIZE}.\n'
-                        'Я уже запустила пополнение. Проверь /buffer_status чуть позже.'
-                    ),
-                )
                 log_operation(
                     logger,
                     operation='game_start',
                     chat_id=chat_id,
-                    result='cache_below_start_threshold',
+                    result='cache_below_start_threshold_soft',
                     duration_ms=(time.perf_counter() - started) * 1000,
                     extra={
                         'question_limit': question_limit,
@@ -226,9 +230,8 @@ class GameManager:
                         'cache_size': cache_size,
                         'min_start_cache_size': self.quiz_engine.MIN_START_CACHE_SIZE,
                     },
-                    level=logging.WARNING,
+                    level=logging.INFO,
                 )
-                return 'Сейчас нет достаточного запаса вопросов для старта. Попробуй позже.'
 
             try:
                 await asyncio.wait_for(
@@ -242,23 +245,28 @@ class GameManager:
 
             if not state.question_buffer:
                 cache_size = await self.db.get_valid_llm_questions_count()
-                asyncio.create_task(
-                    self.quiz_engine.maybe_start_background_cache_refill(
-                        chat_id=chat_id,
-                        quiz_mode=quiz_mode,
-                        preferred_category=preferred_category,
-                    )
-                )
                 guidance = 'Проверь /buffer_status и попробуй ещё раз через 1-2 минуты.'
-                if cache_size >= self.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+                if settings.quiz_allow_generation:
+                    asyncio.create_task(
+                        self.quiz_engine.maybe_start_background_cache_refill(
+                            chat_id=chat_id,
+                            quiz_mode=quiz_mode,
+                            preferred_category=preferred_category,
+                        )
+                    )
+                    if cache_size >= self.quiz_engine.LOW_WATERMARK_CACHE_SIZE:
+                        guidance = (
+                            'Похоже, текущие фильтры повторов слишком строгие для этого чата. '
+                            'Попробуй /quiz_repeat_rules 1 и запусти ещё раз.'
+                        )
+                else:
                     guidance = (
-                        'Похоже, текущие фильтры повторов слишком строгие для этого чата. '
-                        'Попробуй /quiz_repeat_rules 1 и запусти ещё раз.'
+                        'Автогенерация отключена: работаем только из текущего буфера. '
+                        'Проверь /buffer_status и при необходимости ослабь фильтры /quiz_repeat_rules 1.'
                     )
                 await bot.send_message(
                     chat_id,
-                    'Пока не удалось получить LLM-вопросы. '
-                    'Я уже запустил фоновое пополнение кэша. '
+                    'Пока не удалось получить вопросы из буфера. '
                     f'{guidance}',
                 )
                 log_operation(
@@ -356,27 +364,33 @@ class GameManager:
         if state.current_question_answered:
             return False
 
+        used_attempts = state.answer_attempts_by_user.get(user_id, 0)
+        if used_attempts >= settings.max_answers_per_user_per_question:
+            if user_id not in state.answer_limit_notified_user_ids:
+                state.answer_limit_notified_user_ids.add(user_id)
+                await bot.send_message(
+                    chat_id,
+                    f'@{username}, у тебя уже {settings.max_answers_per_user_per_question} попытки на этот вопрос. '
+                    'Ждём ответы других участников.',
+                )
+            return False
+        state.answer_attempts_by_user[user_id] = used_attempts + 1
+
         verdict = self.answer_flow.match_verdict(text, state.current_question)
 
         if verdict == 'wrong':
             self.adaptive_difficulty.note_wrong(chat_id)
             state.wrong_attempts_count += 1
-            if self.answer_flow.register_wrong_attempt(state, user_id):
-                response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
-                await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
-                await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
-            if state.wrong_attempts_count >= 3:
-                self._cancel_question_task(chat_id)
-                state.last_correct_user_id = None
-                state.correct_streak_count = 0
-                await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
-                await self._ask_next_question(bot, chat_id)
+            self.answer_flow.register_wrong_attempt(state, user_id)
+            response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+            await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
+            await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
             self.adaptive_difficulty.note_close(chat_id)
-            if self.answer_flow.register_close_attempt(state, user_id):
-                await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
+            self.answer_flow.register_close_attempt(state, user_id)
+            await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
             return False
 
         question = state.current_question
@@ -600,17 +614,21 @@ class GameManager:
             self.participation_decision.mark_initiative(chat_id, user_id)
         else:
             self.participation_decision.mark_replied(chat_id)
+
+        reply_kwargs = self._build_participation_reply_kwargs(message_id, decision.reason_codes)
+        outgoing_text = validated_reply
+
         self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
         self.chat_history.remember_message(
             chat_id,
             'assistant',
             settings.alisa_name,
-            validated_reply,
+            outgoing_text,
             author_id=bot.id,
             addressed_to_alisa=False,
         )
         try:
-            await safe_bot_send_message(bot, chat_id, validated_reply)
+            await safe_bot_send_message(bot, chat_id, outgoing_text, **reply_kwargs)
         except Exception as exc:  # noqa: BLE001
             self.decision_audit.record(
                 DecisionAuditEvent(
@@ -737,7 +755,8 @@ class GameManager:
             await self.quiz_engine.prepare_question_buffer(state, list(state.scores.keys()))
             question = await self.quiz_engine.select_next_question(state)
             if question is None:
-                await self.quiz_engine.request_generation_if_buffer_low(state)
+                if settings.quiz_allow_generation:
+                    await self.quiz_engine.request_generation_if_buffer_low(state)
                 question = await self.quiz_engine.select_next_question(state)
         except Exception as exc:
             logger.exception('Failed to obtain question: %s', exc)
@@ -761,6 +780,8 @@ class GameManager:
         state.hints_used_for_current_question = 0
         state.near_miss_user_ids = set()
         state.wrong_reply_user_ids = set()
+        state.answer_attempts_by_user = {}
+        state.answer_limit_notified_user_ids = set()
         state.wrong_attempts_count = 0
         state.used_question_keys.add(question.key)
         if question.question_id is not None:

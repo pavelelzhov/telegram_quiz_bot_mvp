@@ -42,6 +42,7 @@ class MemoryStore:
                 'last_alisa_message_at': '',
                 'last_alisa_initiative_at': '',
                 'last_conflict_at': '',
+                'recent_dialogue': [],
             },
         )
         return chat
@@ -69,6 +70,9 @@ class MemoryStore:
                 'recent_sentiment_toward_alisa': 'neutral',
                 'last_interaction_mode': 'observed_silence',
                 'last_significant_interaction_at': '',
+                'recent_highlights': [],
+                'interaction_style': 'neutral',
+                'energy_preference': 'medium',
             },
         )
         user['username'] = username
@@ -114,6 +118,10 @@ class MemoryStore:
         elif addressed_to_alisa:
             user['rapport_score'] = min(1.0, float(user.get('rapport_score', 0.0)) + 0.05)
             user['recent_sentiment_toward_alisa'] = 'positive'
+
+        self._remember_recent_dialogue(chat, user_id, username, text, addressed_to_alisa)
+        self._remember_user_highlight(user, text)
+        self._update_user_tone_profile(user, text)
 
         user['summary'] = self._build_user_summary(user)
         chat['chat_vibe_summary'] = self._build_chat_summary(chat)
@@ -167,6 +175,49 @@ class MemoryStore:
             return 'контакт нормальный, спокойный дружелюбный тон'
         return 'нейтральный контакт, без лишней резкости'
 
+    def get_user_recent_context(self, chat_id: int, user_id: int, username: str, limit: int = 4) -> str:
+        chat = self._ensure_chat(chat_id)
+        user = self._ensure_user(chat, user_id, username)
+        recent = list(user.get('recent_highlights') or [])[-max(1, limit):]
+        if not recent:
+            return 'нет недавних персональных зацепок'
+        return ' | '.join(str(item) for item in recent)
+
+    def get_chat_recent_context(self, chat_id: int, limit: int = 6) -> str:
+        chat = self._ensure_chat(chat_id)
+        recent = list(chat.get('recent_dialogue') or [])[-max(1, limit):]
+        if not recent:
+            return 'свежего диалога пока мало'
+        parts: list[str] = []
+        for item in recent:
+            speaker = str(item.get('speaker') or 'кто-то')
+            text = str(item.get('text') or '').strip()
+            if not text:
+                continue
+            parts.append(f'{speaker}: {text}')
+        return ' || '.join(parts) if parts else 'свежего диалога пока мало'
+
+    def get_personalization_brief(self, chat_id: int, user_id: int, username: str) -> str:
+        chat = self._ensure_chat(chat_id)
+        user = self._ensure_user(chat, user_id, username)
+        style = str(user.get('interaction_style') or 'neutral')
+        energy = str(user.get('energy_preference') or 'medium')
+        sentiment = str(user.get('recent_sentiment_toward_alisa') or 'neutral')
+        rapport = float(user.get('rapport_score', 0.0))
+
+        rapport_label = 'новый контакт'
+        if rapport >= 0.65:
+            rapport_label = 'свой человек'
+        elif rapport >= 0.35:
+            rapport_label = 'уже знакомы'
+
+        return (
+            f'стиль общения пользователя: {style}; '
+            f'предпочитаемая энергия: {energy}; '
+            f'последний эмоциональный сигнал к Алисе: {sentiment}; '
+            f'статус контакта: {rapport_label}'
+        )
+
     def get_chat_tension_level(self, chat_id: int) -> float:
         chat = self._ensure_chat(chat_id)
         try:
@@ -190,6 +241,54 @@ class MemoryStore:
     def _bump_scores(self, target: dict[str, Any], topics: list[str], weight: int) -> None:
         for topic in topics:
             target[topic] = int(target.get(topic, 0)) + weight
+
+    def _remember_recent_dialogue(
+        self,
+        chat: dict[str, Any],
+        user_id: int,
+        username: str,
+        text: str,
+        addressed_to_alisa: bool,
+    ) -> None:
+        recent = list(chat.get('recent_dialogue') or [])
+        recent.append(
+            {
+                'user_id': int(user_id),
+                'speaker': username,
+                'text': text[:140],
+                'addressed_to_alisa': bool(addressed_to_alisa),
+            }
+        )
+        chat['recent_dialogue'] = recent[-30:]
+
+    def _remember_user_highlight(self, user: dict[str, Any], text: str) -> None:
+        value = text.strip()
+        if not value:
+            return
+        highlights = list(user.get('recent_highlights') or [])
+        highlights.append(value[:140])
+        user['recent_highlights'] = highlights[-12:]
+
+    def _update_user_tone_profile(self, user: dict[str, Any], text: str) -> None:
+        lowered = text.lower()
+
+        warm_tokens = ('спасибо', 'класс', 'супер', 'обожаю', 'кайф', 'люблю')
+        edgy_tokens = ('лол', 'ахах', 'ору', 'жесть', 'рофл', 'угар')
+        formal_tokens = ('подскажи', 'объясни', 'пожалуйста', 'уточни')
+
+        if any(token in lowered for token in warm_tokens):
+            user['interaction_style'] = 'warm'
+        elif any(token in lowered for token in edgy_tokens):
+            user['interaction_style'] = 'playful'
+        elif any(token in lowered for token in formal_tokens):
+            user['interaction_style'] = 'focused'
+
+        energy = 'medium'
+        if text.count('!') >= 2 or len(re.findall(r'[😂🤣🔥✨❤️🙂😉😍]', text)) >= 2:
+            energy = 'high'
+        elif len(text) > 180 or text.count(',') >= 4:
+            energy = 'low'
+        user['energy_preference'] = energy
 
     def _build_user_summary(self, user: dict[str, Any]) -> str:
         topic_scores = user.get('topic_scores', {}) or {}

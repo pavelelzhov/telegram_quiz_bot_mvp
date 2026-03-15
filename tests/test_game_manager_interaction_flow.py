@@ -10,6 +10,7 @@ os.environ.setdefault('OPENAI_API_KEY', 'test-openai-key')
 
 from app.core.game_manager import GameManager
 from app.core.models import QuestionCandidate
+from app.config import settings
 from app.storage.db import Database
 
 
@@ -55,6 +56,13 @@ class _BatchProvider:
 
 
 class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._old_generation = settings.quiz_allow_generation
+        settings.quiz_allow_generation = True
+
+    def tearDown(self) -> None:
+        settings.quiz_allow_generation = self._old_generation
+
     def _build_db_path(self, tmp_dir: str) -> str:
         return str(Path(tmp_dir) / 'interaction_flow.db')
 
@@ -107,7 +115,7 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await manager.stop_game(bot=bot, chat_id=123, reason='test cleanup')
 
-    async def test_three_unique_wrong_answers_force_next_question(self) -> None:
+    async def test_wrong_answers_do_not_force_next_question(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db = Database(self._build_db_path(tmp_dir))
             await db.init()
@@ -131,13 +139,13 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
                 await manager.handle_answer(bot=bot, chat_id=124, user_id=2, username='u2', text='неверно')
                 await manager.handle_answer(bot=bot, chat_id=124, user_id=3, username='u3', text='неверно')
 
-                self.assertEqual(state.asked_count, 2)
+                self.assertEqual(state.asked_count, 1)
                 self.assertIsNotNone(state.current_question)
-                self.assertNotEqual(state.current_question.question, first_question_text)
+                self.assertEqual(state.current_question.question, first_question_text)
             finally:
                 await manager.stop_game(bot=bot, chat_id=124, reason='test cleanup')
 
-    async def test_three_wrong_attempts_from_same_user_force_next_question(self) -> None:
+    async def test_user_can_answer_only_twice_and_other_user_can_close_question(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db = Database(self._build_db_path(tmp_dir))
             await db.init()
@@ -155,14 +163,21 @@ class GameManagerInteractionFlowTests(unittest.IsolatedAsyncioTestCase):
 
                 state = manager.get_game(125)
                 assert state is not None
-                first_question_text = state.current_question.question if state.current_question else ''
+                assert state.current_question is not None
+                first_question_text = state.current_question.question
+                first_answer = state.current_question.answer
 
                 await manager.handle_answer(bot=bot, chat_id=125, user_id=9, username='solo', text='мимо 1')
                 await manager.handle_answer(bot=bot, chat_id=125, user_id=9, username='solo', text='мимо 2')
-                await manager.handle_answer(bot=bot, chat_id=125, user_id=9, username='solo', text='мимо 3')
+                await manager.handle_answer(bot=bot, chat_id=125, user_id=9, username='solo', text=first_answer)
 
+                self.assertEqual(state.asked_count, 1)
+                self.assertEqual(state.current_question.question, first_question_text)
+
+                handled = await manager.handle_answer(bot=bot, chat_id=125, user_id=10, username='other', text=first_answer)
+
+                self.assertTrue(handled)
                 self.assertEqual(state.asked_count, 2)
-                self.assertIsNotNone(state.current_question)
                 self.assertNotEqual(state.current_question.question, first_question_text)
             finally:
                 await manager.stop_game(bot=bot, chat_id=125, reason='test cleanup')

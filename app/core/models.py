@@ -121,7 +121,7 @@ class PlayerScore:
 
 @dataclass(slots=True)
 class ChatSettings:
-    question_timeout_sec: int = 30
+    question_timeout_sec: int = 45
     game_profile: str = 'standard'
     image_rounds_enabled: bool = True
     music_rounds_enabled: bool = True
@@ -155,6 +155,8 @@ class GameState:
     hints_used_for_current_question: int = 0
     near_miss_user_ids: Set[int] = field(default_factory=set)
     wrong_reply_user_ids: Set[int] = field(default_factory=set)
+    answer_attempts_by_user: Dict[int, int] = field(default_factory=dict)
+    answer_limit_notified_user_ids: Set[int] = field(default_factory=set)
     wrong_attempts_count: int = 0
     last_correct_user_id: Optional[int] = None
     correct_streak_count: int = 0

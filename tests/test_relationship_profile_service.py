@@ -33,6 +33,49 @@ class RelationshipProfileServiceTests(unittest.TestCase):
         self.assertTrue(user_summary)
         self.assertTrue(chat_summary)
 
+    def test_recent_context_keeps_multi_user_dialogue_snippets(self) -> None:
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=10,
+            username='alice',
+            text='Обсуждаем кино и музыку',
+            addressed_to_alisa=False,
+        )
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=11,
+            username='bob',
+            text='А я за документалки',
+            addressed_to_alisa=False,
+        )
+        self.service.note_user_message(
+            chat_id=2,
+            user_id=10,
+            username='alice',
+            text='Мне ещё sci-fi нравится',
+            addressed_to_alisa=False,
+        )
+
+        user_recent = self.memory_store.get_user_recent_context(2, 10, 'alice')
+        chat_recent = self.memory_store.get_chat_recent_context(2)
+
+        self.assertIn('sci-fi', user_recent)
+        self.assertIn('alice:', chat_recent)
+        self.assertIn('bob:', chat_recent)
+
+    def test_personalization_brief_reflects_style_and_energy(self) -> None:
+        self.service.note_user_message(
+            chat_id=3,
+            user_id=99,
+            username='neo',
+            text='Алиса, спасибо!!! Это просто кайф 😂😂',
+            addressed_to_alisa=True,
+        )
+
+        brief = self.memory_store.get_personalization_brief(3, 99, 'neo')
+        self.assertIn('стиль общения пользователя: warm', brief)
+        self.assertIn('предпочитаемая энергия: high', brief)
+
 
 if __name__ == '__main__':
     unittest.main()

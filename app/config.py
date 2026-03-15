@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     max_hints_per_question: int = 1
     default_question_count: int = 25
     recent_questions_limit: int = 100
+    quiz_allow_generation: bool = False
     log_level: str = 'INFO'
 
     alisa_enabled: bool = True

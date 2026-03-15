@@ -101,6 +101,25 @@ class GameManager:
             self.start_locks[chat_id] = lock
         return lock
 
+    def _build_participation_reply_kwargs(self, message_id: int | None, reason_codes: list[str]) -> dict[str, object]:
+        if message_id is None or message_id <= 0:
+            return {}
+        should_reply_to_message = any(
+            code in reason_codes
+            for code in (
+                'addressed_by_reply',
+                'addressed_by_name',
+                'addressed_by_mention',
+                'addressed_followup_window',
+                'addressed_followup_chat_window',
+                'passive_dialogue_join',
+                'passive_initiative_allowed',
+            )
+        )
+        if not should_reply_to_message:
+            return {}
+        return {'reply_to_message_id': message_id, 'allow_sending_without_reply': True}
+
     def get_game(self, chat_id: int) -> Optional[GameState]:
         return self.games.get(chat_id)
 
@@ -589,17 +608,21 @@ class GameManager:
             self.participation_decision.mark_initiative(chat_id, user_id)
         else:
             self.participation_decision.mark_replied(chat_id)
+
+        reply_kwargs = self._build_participation_reply_kwargs(message_id, decision.reason_codes)
+        outgoing_text = validated_reply
+
         self.relationship_profiles.note_alisa_reply(chat_id=chat_id, user_id=user_id, mode=mode)
         self.chat_history.remember_message(
             chat_id,
             'assistant',
             settings.alisa_name,
-            validated_reply,
+            outgoing_text,
             author_id=bot.id,
             addressed_to_alisa=False,
         )
         try:
-            await safe_bot_send_message(bot, chat_id, validated_reply)
+            await safe_bot_send_message(bot, chat_id, outgoing_text, **reply_kwargs)
         except Exception as exc:  # noqa: BLE001
             self.decision_audit.record(
                 DecisionAuditEvent(

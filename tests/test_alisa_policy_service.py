@@ -93,6 +93,22 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         self.assertTrue(decision.should_reply)
         self.assertIn('addressed_followup_window', decision.reason_codes)
 
+    def test_chat_followup_window_allows_other_user_in_group_dialogue(self) -> None:
+        now = time.time()
+        self.service.last_addressed_chat_ts[50] = now
+        decision = self.service.decide(
+            chat_id=50,
+            user_id=777,
+            addressed=AddressingDecision(False, None, ['suppressed_not_addressed']),
+            quiz_active=False,
+            recent_messages=8,
+            recent_unique_users=3,
+            tension_level=0.1,
+            now_ts=now + 6,
+        )
+        self.assertTrue(decision.should_reply)
+        self.assertIn('addressed_followup_chat_window', decision.reason_codes)
+
     def test_initiative_allowed_on_activity(self) -> None:
         decision = self.service.decide(
             chat_id=7,
@@ -106,6 +122,21 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         )
         self.assertTrue(decision.should_reply)
         self.assertEqual(decision.mode, 'initiative_topic_drop')
+
+    def test_light_dialogue_join_triggers_before_full_initiative_threshold(self) -> None:
+        decision = self.service.decide(
+            chat_id=701,
+            user_id=44,
+            addressed=AddressingDecision(False, None, ['suppressed_not_addressed']),
+            quiz_active=False,
+            recent_messages=7,
+            recent_unique_users=2,
+            tension_level=0.2,
+            now_ts=time.time() + 5000,
+        )
+        self.assertTrue(decision.should_reply)
+        self.assertEqual(decision.mode, 'initiative_topic_drop')
+        self.assertIn('passive_dialogue_join', decision.reason_codes)
 
     def test_initiative_avoids_same_user_streak_when_chat_is_active(self) -> None:
         now = time.time()
@@ -171,17 +202,34 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertTrue(text)
         self.assertTrue(rewritten)
         self.assertIn('rewritten_repeated_reply', reasons)
+        self.assertIn(text, {
+            'Скажу короче: Привет, как дела?',
+            'Коротко так: Привет, как дела?',
+            'Если по-простому: Привет, как дела?',
+            'Суть такая: Привет, как дела?',
+        })
 
     def test_repeated_reply_suppressed_when_rewrite_still_duplicate(self) -> None:
         text, reasons, rewritten = self.service.validate_and_clamp(
             text='Привет, как дела?',
             mode='addressed_reply',
             quiz_active=False,
-            recent_assistant_texts=['Привет, как дела?', 'Скажу короче: Привет, как дела?'],
+            recent_assistant_texts=['Привет, как дела?', 'Суть такая: Привет, как дела?'],
         )
         self.assertEqual(text, '')
         self.assertFalse(rewritten)
         self.assertIn('suppressed_repeated_reply', reasons)
+
+    def test_repeated_micro_reaction_rewritten_to_human_short_variant(self) -> None:
+        text, reasons, rewritten = self.service.validate_and_clamp(
+            text='Спасибо! ❤️',
+            mode='micro_reaction',
+            quiz_active=False,
+            recent_assistant_texts=['Спасибо! ❤️'],
+        )
+        self.assertTrue(rewritten)
+        self.assertIn('rewritten_repeated_reply', reasons)
+        self.assertIn(text, {'Есть контакт 🙂', 'Окей, приняла.', 'Поймала вайб 😌', 'Норм, едем дальше.'})
 
 
     def test_micro_reaction_has_stricter_length_limit(self) -> None:
@@ -204,6 +252,29 @@ class ReplyValidationServiceTests(unittest.TestCase):
         self.assertTrue(text)
         self.assertTrue(rewritten)
         self.assertTrue(any(reason.startswith('clamped_') for reason in reasons))
+
+
+class PersonaPolicyServiceTests(unittest.TestCase):
+    def test_choose_mode_prefers_micro_reaction_for_addressed_short_social_phrase(self) -> None:
+        from app.core.alisa_policy import PersonaPolicyService
+
+        service = PersonaPolicyService()
+        mode = service.choose_mode(text='Алиса, спасибо!', addressed_by='name', quiz_active=False)
+        self.assertEqual(mode, 'micro_reaction')
+
+    def test_choose_mode_stays_addressed_reply_without_micro_token(self) -> None:
+        from app.core.alisa_policy import PersonaPolicyService
+
+        service = PersonaPolicyService()
+        mode = service.choose_mode(text='Алиса, как думаешь?', addressed_by='name', quiz_active=False)
+        self.assertEqual(mode, 'addressed_reply')
+
+    def test_choose_mode_prefers_micro_reaction_for_emoji_ping(self) -> None:
+        from app.core.alisa_policy import PersonaPolicyService
+
+        service = PersonaPolicyService()
+        mode = service.choose_mode(text='❤️❤️', addressed_by='reply', quiz_active=False)
+        self.assertEqual(mode, 'micro_reaction')
 
 
 if __name__ == '__main__':

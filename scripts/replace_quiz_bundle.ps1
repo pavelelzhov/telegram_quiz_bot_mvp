@@ -73,4 +73,4 @@ Write-Host '  git pull --rebase origin main'
 Write-Host '  git push origin main'
 Write-Host ''
 Write-Host 'Импорт в базу (та же логика):'
-Write-Host '  python -m scripts.import_quiz_bundle --zip-path ".\quiz_30000_sticky_v1_bundle.zip" --db-path ".\quiz.db"'
+Write-Host "  python -m scripts.import_quiz_bundle --zip-path '.\\quiz_30000_sticky_v1_bundle.zip' --db-path '.\\quiz.db'"

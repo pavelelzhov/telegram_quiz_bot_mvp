@@ -60,6 +60,19 @@ def _compute_hash(*parts: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _normalize_aliases(raw_value: Any) -> list[str]:
+    if isinstance(raw_value, list):
+        return [str(item).strip() for item in raw_value if str(item).strip()]
+
+    if isinstance(raw_value, str):
+        parts = raw_value
+        for separator in (';', ','):
+            parts = parts.replace(separator, '|')
+        return [item.strip() for item in parts.split('|') if item.strip()]
+
+    return []
+
+
 def _row_to_candidate(row: dict[str, Any]) -> QuestionCandidate | None:
     question = str(row.get('question') or row.get('question_text') or '').strip()
     answer = str(row.get('answer') or row.get('correct_answer') or row.get('correct_answer_text') or '').strip()
@@ -73,13 +86,11 @@ def _row_to_candidate(row: dict[str, Any]) -> QuestionCandidate | None:
 
     question_hash = _compute_hash(question, answer, topic)
     uniqueness_hash = _compute_hash(question, topic)
-    aliases_raw = row.get('aliases') or row.get('alt_answers') or []
-    if isinstance(aliases_raw, str):
-        aliases = [item.strip() for item in aliases_raw.split('|') if item.strip()]
-    elif isinstance(aliases_raw, list):
-        aliases = [str(item).strip() for item in aliases_raw if str(item).strip()]
-    else:
-        aliases = []
+    aliases = _normalize_aliases(row.get('aliases') or row.get('alt_answers') or row.get('accepted_answers') or [])
+    hint = str(row.get('hint') or row.get('tip') or '').strip()
+    explanation = str(row.get('explanation') or row.get('fact') or '').strip()
+    if not explanation:
+        explanation = 'Факт временно недоступен.'
 
     return QuestionCandidate(
         provider_name='import_zip',
@@ -91,7 +102,7 @@ def _row_to_candidate(row: dict[str, Any]) -> QuestionCandidate | None:
         question_type='text',
         question_text=question,
         correct_answer_text=answer,
-        explanation=str(row.get('explanation') or row.get('fact') or ''),
+        explanation=explanation,
         canonical_facts=[str(row.get('fact') or '').strip()] if row.get('fact') else [],
         uniqueness_tags=[topic],
         question_hash=question_hash,
@@ -99,7 +110,10 @@ def _row_to_candidate(row: dict[str, Any]) -> QuestionCandidate | None:
         quality_score=0.8,
         is_valid=True,
         created_for_mode='classic',
-        raw_payload={'aliases': aliases},
+        raw_payload={
+            'aliases': aliases,
+            'hint': hint,
+        },
     )
 
 

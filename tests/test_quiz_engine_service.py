@@ -112,5 +112,44 @@ class QuizEngineServiceTests(unittest.TestCase):
         self.assertGreater(len({item.get('topic') for item in mixed[:3]}), 1)
 
 
+    def test_candidate_to_quiz_question_uses_aliases_and_hint(self) -> None:
+        candidate = {
+            'id': 7,
+            'topic': 'История',
+            'difficulty': 'medium',
+            'question_text': 'Кто основал Санкт-Петербург?',
+            'correct_answer_text': 'Пётр I',
+            'aliases': ['Петр 1', 'Пётр Первый'],
+            'hint_text': 'Подумай про первого императора.',
+            'explanation': 'Город был основан Петром I в 1703 году.',
+            'question_type': 'text',
+            'question_hash': 'qh-1',
+            'uniqueness_hash': 'uh-1',
+            'quality_score': 0.8,
+        }
+
+        question = self.service._candidate_to_quiz_question(candidate)
+
+        self.assertEqual(question.answer, 'Пётр I')
+        self.assertEqual(question.aliases, ['Петр 1', 'Пётр Первый'])
+        self.assertEqual(question.hint, 'Подумай про первого императора.')
+
+    def test_candidate_to_quiz_question_uses_default_hint(self) -> None:
+        candidate = {
+            'id': 1,
+            'topic': 'Общие знания',
+            'difficulty': 'easy',
+            'question_text': 'Q',
+            'correct_answer_text': 'A',
+            'explanation': 'E',
+            'question_type': 'text',
+        }
+
+        question = self.service._candidate_to_quiz_question(candidate)
+
+        self.assertEqual(question.aliases, [])
+        self.assertEqual(question.hint, 'Подумай о главном факте вопроса.')
+
+
 if __name__ == '__main__':
     unittest.main()

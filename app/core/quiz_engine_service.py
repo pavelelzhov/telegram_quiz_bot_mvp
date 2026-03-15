@@ -266,22 +266,7 @@ class QuizEngineService:
             if answer_fingerprint and answer_fingerprint in buffer_answer_fingerprints:
                 continue
             game_state.question_buffer.append(
-                QuizQuestion(
-                    category=item.get('topic') or 'Общие знания',
-                    difficulty=item['difficulty'],
-                    topic=item.get('topic') or '',
-                    question=item['question_text'],
-                    answer=item['correct_answer_text'],
-                    aliases=[],
-                    hint='Подумай о главном факте вопроса.',
-                    explanation=item['explanation'],
-                    question_type=item['question_type'],
-                    source='llm_cache',
-                    question_id=item['id'],
-                    question_hash=item.get('question_hash', ''),
-                    uniqueness_hash=item.get('uniqueness_hash', ''),
-                    quality_score=float(item.get('quality_score') or 0),
-                )
+                self._candidate_to_quiz_question(item)
             )
             if answer_fingerprint:
                 buffer_answer_fingerprints.add(answer_fingerprint)
@@ -318,6 +303,31 @@ class QuizEngineService:
                 break
 
         return mixed
+
+    def _candidate_to_quiz_question(self, item: dict) -> QuizQuestion:
+        raw_aliases = item.get('aliases')
+        aliases: list[str] = []
+        if isinstance(raw_aliases, list):
+            aliases = [str(alias).strip() for alias in raw_aliases if str(alias).strip()]
+
+        hint_text = str(item.get('hint_text') or '').strip() or 'Подумай о главном факте вопроса.'
+
+        return QuizQuestion(
+            category=item.get('topic') or 'Общие знания',
+            difficulty=item['difficulty'],
+            topic=item.get('topic') or '',
+            question=item['question_text'],
+            answer=item['correct_answer_text'],
+            aliases=aliases,
+            hint=hint_text,
+            explanation=item['explanation'],
+            question_type=item['question_type'],
+            source='llm_cache',
+            question_id=item['id'],
+            question_hash=item.get('question_hash', ''),
+            uniqueness_hash=item.get('uniqueness_hash', ''),
+            quality_score=float(item.get('quality_score') or 0),
+        )
 
     async def select_next_question(self, game_state: GameState, player_id: int | None = None) -> QuizQuestion | None:
         if not game_state.question_buffer:

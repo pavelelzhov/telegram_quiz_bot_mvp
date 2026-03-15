@@ -13,8 +13,9 @@ class Settings(BaseSettings):
     yandex_search_api_key: str = ''
     yandex_search_folder_id: str = ''
 
-    question_timeout_sec: int = 30
+    question_timeout_sec: int = 45
     max_hints_per_question: int = 1
+    max_answers_per_user_per_question: int = 2
     default_question_count: int = 25
     recent_questions_limit: int = 100
     quiz_allow_generation: bool = False

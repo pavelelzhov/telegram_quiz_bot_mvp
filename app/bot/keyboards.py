@@ -44,8 +44,6 @@ BUTTON_TEXTS = set(BUTTON_TO_CATEGORY.keys()) | {
     '📦 Буфер LLM',
     '🧠 Solo Start',
     '📅 Daily',
-    '📈 My Level',
-    '👤 Profile',
 }
 
 
@@ -92,7 +90,7 @@ def topics_menu_kb() -> ReplyKeyboardMarkup:
 def profile_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text='🙋 Профиль'), KeyboardButton(text='👤 Profile'), KeyboardButton(text='📈 My Level')],
+            [KeyboardButton(text='🙋 Профиль')],
             [KeyboardButton(text='👥 Топ'), KeyboardButton(text='🏅 Сезон'), KeyboardButton(text='🗓 Неделя')],
             [KeyboardButton(text='🕘 Последняя игра'), KeyboardButton(text='📦 Буфер LLM')],
             [KeyboardButton(text='🏠 Главное меню')],

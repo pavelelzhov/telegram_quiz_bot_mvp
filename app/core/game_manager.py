@@ -364,27 +364,33 @@ class GameManager:
         if state.current_question_answered:
             return False
 
+        used_attempts = state.answer_attempts_by_user.get(user_id, 0)
+        if used_attempts >= settings.max_answers_per_user_per_question:
+            if user_id not in state.answer_limit_notified_user_ids:
+                state.answer_limit_notified_user_ids.add(user_id)
+                await bot.send_message(
+                    chat_id,
+                    f'@{username}, у тебя уже {settings.max_answers_per_user_per_question} попытки на этот вопрос. '
+                    'Ждём ответы других участников.',
+                )
+            return False
+        state.answer_attempts_by_user[user_id] = used_attempts + 1
+
         verdict = self.answer_flow.match_verdict(text, state.current_question)
 
         if verdict == 'wrong':
             self.adaptive_difficulty.note_wrong(chat_id)
             state.wrong_attempts_count += 1
-            if self.answer_flow.register_wrong_attempt(state, user_id):
-                response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
-                await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
-                await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
-            if state.wrong_attempts_count >= 3:
-                self._cancel_question_task(chat_id)
-                state.last_correct_user_id = None
-                state.correct_streak_count = 0
-                await bot.send_message(chat_id, self.round_lifecycle.build_timeout_text(state.current_question))
-                await self._ask_next_question(bot, chat_id)
+            self.answer_flow.register_wrong_attempt(state, user_id)
+            response_ms = int(max(0.0, (time.time() - state.current_question_started_ts) * 1000))
+            await self.answer_flow.finalize_answer(state, user_id, was_correct=False, response_ms=response_ms)
+            await bot.send_message(chat_id, self.feedback_text.wrong_answer_text(username, state.current_question))
             return False
 
         if verdict == 'close':
             self.adaptive_difficulty.note_close(chat_id)
-            if self.answer_flow.register_close_attempt(state, user_id):
-                await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
+            self.answer_flow.register_close_attempt(state, user_id)
+            await bot.send_message(chat_id, self.feedback_text.near_miss_text(username, state.current_question))
             return False
 
         question = state.current_question
@@ -774,6 +780,8 @@ class GameManager:
         state.hints_used_for_current_question = 0
         state.near_miss_user_ids = set()
         state.wrong_reply_user_ids = set()
+        state.answer_attempts_by_user = {}
+        state.answer_limit_notified_user_ids = set()
         state.wrong_attempts_count = 0
         state.used_question_keys.add(question.key)
         if question.question_id is not None:

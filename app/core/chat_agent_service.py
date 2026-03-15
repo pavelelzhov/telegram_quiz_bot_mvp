@@ -81,9 +81,11 @@ class ChatAgentService:
         relationship_hint = self.memory_store.get_relationship_hint(chat_id, user_id, username)
         user_recent_context = self.memory_store.get_user_recent_context(chat_id, user_id, username, limit=4)
         chat_recent_context = self.memory_store.get_chat_recent_context(chat_id, limit=6)
+        personalization_brief = self.memory_store.get_personalization_brief(chat_id, user_id, username)
 
         enriched_user_memory = f'{user_memory}; недавние реплики: {user_recent_context}'
         enriched_chat_memory = f'{chat_memory}; свежий диалог: {chat_recent_context}'
+        enriched_relationship_hint = f'{relationship_hint}; {personalization_brief}'
 
         return await self.agent_reply_provider.generate_reply(
             chat_title=chat_title,
@@ -96,6 +98,6 @@ class ChatAgentService:
             user_memory=enriched_user_memory,
             chat_memory=enriched_chat_memory,
             mode=final_mode,
-            relationship_hint=relationship_hint,
+            relationship_hint=enriched_relationship_hint,
             sharpness_ceiling=self.resolve_sharpness_ceiling(final_mode),
         )

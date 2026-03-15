@@ -63,6 +63,19 @@ class RelationshipProfileServiceTests(unittest.TestCase):
         self.assertIn('alice:', chat_recent)
         self.assertIn('bob:', chat_recent)
 
+    def test_personalization_brief_reflects_style_and_energy(self) -> None:
+        self.service.note_user_message(
+            chat_id=3,
+            user_id=99,
+            username='neo',
+            text='Алиса, спасибо!!! Это просто кайф 😂😂',
+            addressed_to_alisa=True,
+        )
+
+        brief = self.memory_store.get_personalization_brief(3, 99, 'neo')
+        self.assertIn('стиль общения пользователя: warm', brief)
+        self.assertIn('предпочитаемая энергия: high', brief)
+
 
 if __name__ == '__main__':
     unittest.main()

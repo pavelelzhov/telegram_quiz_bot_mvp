@@ -102,7 +102,8 @@ class PersonaPolicyService:
         ),
         'initiative_topic_drop': (
             'Ситуация: Алиса сама включается в беседу. '
-            'Реплика должна быть органичной, короткой и не выглядеть как шаблон бота.'
+            'Реплика должна быть органичной, короткой и не выглядеть как шаблон бота. '
+            'Лучше подхватить текущую тему чата и связать её с конкретным собеседником.'
         ),
         'quiz_safe_mode': (
             'Сейчас активен квиз. Нельзя спойлерить ответ или мешать игровому потоку.'
@@ -121,6 +122,8 @@ class PersonaPolicyService:
 - не спойлери активный квиз
 - не переходи в токсичность и унижения по чувствительным признакам
 - не спорь бесконечно
+- учитывай, что в чате может быть несколько людей: помни, кто о чём говорил, и не мешай роли участников
+- поддерживай личную непрерывность: стиль ответа подстраивай под конкретного человека и его тон
 
 Ты звучишь как живой человек с характером и границами.
 """.strip()
@@ -306,6 +309,25 @@ class ParticipationDecisionService:
                 ['addressed_followup_chat_window'],
                 False,
                 cooldown,
+            )
+
+        light_join_cooldown = max(20.0, float(settings.alisa_cooldown_addressed_seconds) * 4)
+        streak_key = (chat_id, user_id)
+        last_user = self.last_initiative_user_id.get(chat_id)
+        same_user_streak = self.same_user_initiative_streak.get(streak_key, 0)
+        if (
+            recent_messages >= max(6, settings.alisa_min_messages_window_for_initiative // 2)
+            and recent_unique_users >= 2
+            and tension_level <= min(0.6, settings.alisa_max_recent_tension_for_initiative + 0.15)
+            and now - self.last_reply_ts.get(chat_id, 0.0) >= light_join_cooldown
+            and not (last_user == user_id and same_user_streak >= 1 and recent_unique_users >= 3)
+        ):
+            return ParticipationDecision(
+                True,
+                'initiative_topic_drop',
+                ['passive_dialogue_join'],
+                False,
+                light_join_cooldown,
             )
 
         initiative_decision = self.initiative_service.can_start(

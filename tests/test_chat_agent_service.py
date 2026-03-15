@@ -91,6 +91,9 @@ class ChatAgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('свежий диалог', chat_memory)
         self.assertIn('u:', chat_memory)
         self.assertIn('v:', chat_memory)
+        relationship_hint = str(self.provider.last_kwargs.get('relationship_hint', ''))
+        self.assertIn('стиль общения пользователя', relationship_hint)
+        self.assertIn('предпочитаемая энергия', relationship_hint)
 
 
 if __name__ == '__main__':

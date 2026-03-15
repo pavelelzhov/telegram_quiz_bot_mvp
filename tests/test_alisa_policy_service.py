@@ -123,6 +123,21 @@ class ParticipationDecisionServiceTests(unittest.TestCase):
         self.assertTrue(decision.should_reply)
         self.assertEqual(decision.mode, 'initiative_topic_drop')
 
+    def test_light_dialogue_join_triggers_before_full_initiative_threshold(self) -> None:
+        decision = self.service.decide(
+            chat_id=701,
+            user_id=44,
+            addressed=AddressingDecision(False, None, ['suppressed_not_addressed']),
+            quiz_active=False,
+            recent_messages=7,
+            recent_unique_users=2,
+            tension_level=0.2,
+            now_ts=time.time() + 5000,
+        )
+        self.assertTrue(decision.should_reply)
+        self.assertEqual(decision.mode, 'initiative_topic_drop')
+        self.assertIn('passive_dialogue_join', decision.reason_codes)
+
     def test_initiative_avoids_same_user_streak_when_chat_is_active(self) -> None:
         now = time.time()
         self.service.last_initiative_user_id[7] = 22
